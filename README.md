@@ -23,7 +23,10 @@ Run it as root on a new VM. About two minutes later you have a non-root `agent` 
 
 ## Quick start
 
+Bare Steel VMs ship without `curl`, so install it first:
+
 ```bash
+apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/nibzard/agentbox/main/agentbox.sh | bash
 ```
 
@@ -114,7 +117,7 @@ tailcat browse <address>                 # single web port, opens the browser
 
 ## Requirements
 
-Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS. Tested on Steel sandbox VMs (Debian 13, 1 vCPU, 1 GB). Works on x86_64 and arm64.
+Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS, and `curl` + `ca-certificates` installed (not present on bare Steel VMs — see Quick start). Tested on Steel sandbox VMs (Debian 13, 1 vCPU, 1 GB). Works on x86_64 and arm64.
 
 ## Credits
 
