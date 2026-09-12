@@ -171,6 +171,7 @@ BASE_PKGS=(
   git tmux procps less unzip zip xz-utils file jq vim htop lsof
   iproute2 openssh-client rsync tree bash-completion sudo man-db
   python3 nodejs npm sqlite3 ncdu
+  ncurses-term   # terminfo for xterm-kitty, wezterm, alacritty, foot and more; `work` falls back to xterm-256color for the rest (xterm-ghostty)
 )
 CLI_PKGS=( ripgrep fd-find bat eza fzf zoxide git-delta gh direnv )
 DEV_PKGS=( build-essential python3-pip python3-venv python3-dev shellcheck strace )
@@ -283,6 +284,9 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$P
 [ -f /etc/profile.d/00-agentbox-egress-ca.sh ] && . /etc/profile.d/00-agentbox-egress-ca.sh
 [ -f /etc/profile.d/10-agentbox.sh ] && . /etc/profile.d/10-agentbox.sh
 [ -f "$HOME/.agentbox/env" ] && . "$HOME/.agentbox/env"   # API keys etc. (chmod 600)
+
+# --- login banner: Steel's sshd has no PAM motd, so the shell prints it --------
+case "$-" in *i*) [ -z "${TMUX:-}" ] && [ -s /etc/motd ] && cat /etc/motd ;; esac
 
 # --- history: big, shared, appended, timestamped ------------------------------
 if [ -w /commandhistory/.bash_history ]; then export HISTFILE=/commandhistory/.bash_history; fi
@@ -696,6 +700,8 @@ cat > /usr/local/bin/work <<EOF
 #!/usr/bin/env bash
 # work [session] — attach-or-create a tmux session in $WORKSPACE (as $AGENT_USER)
 s="\${1:-work}"
+# tmux exits with "missing or unsuitable terminal" when the box has no terminfo for \$TERM.
+infocmp "\${TERM:-dumb}" >/dev/null 2>&1 || export TERM=xterm-256color
 if [ "\$(id -u)" -eq 0 ]; then exec su - $AGENT_USER -c "cd $WORKSPACE && (tmux attach -t \$s 2>/dev/null || tmux new -s \$s)"; fi
 cd $WORKSPACE 2>/dev/null || cd ~
 exec tmux attach -t "\$s" 2>/dev/null || exec tmux new -s "\$s"
@@ -914,9 +920,10 @@ cat > /etc/motd <<EOF
     vm-ssh          SSH into this VM from anywhere via tailcat (prints address)
     vm-share PORTS  expose local ports via tailcat  (laptop: tailcat forward <addr> 18080:8080)
     agent-status    versions, auth, tmux, ports
+    agentbox-verify acceptance checks for this box
 
 EOF
-ok "/etc/motd"
+ok "/etc/motd (printed by interactive shells outside tmux)"
 
 # =============================================================================
 printf '\n%s============================================================%s\n' "$c_green" "$c_off"
