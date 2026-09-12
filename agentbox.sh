@@ -116,8 +116,8 @@ CPUS=$(nproc)
 MEM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
 DISK_FREE_GB=$(df -BG --output=avail / | tail -1 | tr -dc '0-9')
 IS_STEEL=0; [[ -d /run/steel ]] && IS_STEEL=1
-if   (( MEM_MB < 2000 )); then TIER=small
-elif (( MEM_MB < 6000 )); then TIER=medium
+if   (( MEM_MB < 1800 )); then TIER=small
+elif (( MEM_MB < 5500 )); then TIER=medium
 else                            TIER=large; fi
 SWAP_MB="${SWAP_MB:-auto}"     # auto | 0 | <MB>
 printf '  machine: %s vCPU, %s MB RAM, %s GB free, tier=%s, steel=%s\n' "$CPUS" "$MEM_MB" "$DISK_FREE_GB" "$TIER" "$IS_STEEL"
@@ -125,11 +125,13 @@ printf '  machine: %s vCPU, %s MB RAM, %s GB free, tier=%s, steel=%s\n' "$CPUS" 
 # =============================================================================
 hdr "1/10  Preflight: /proc, apt, CA certificates"
 # =============================================================================
-# Bun-based binaries (Claude Code) need a real procfs.
-if ! mountpoint -q /proc 2>/dev/null; then
-  mount -t proc proc /proc && ok "mounted /proc" || warn "could not mount /proc"
+# Bun-based binaries (Claude Code) need a *working* procfs. On fresh Steel VMs
+# /proc is mounted but stale (no /proc/self), so `mountpoint` passes while Bun
+# aborts with "panic(main thread)". Test /proc/self and remount over it.
+if [[ ! -e /proc/self/mounts ]]; then
+  mount -t proc proc /proc && ok "remounted /proc (was stale: no /proc/self)" || warn "could not mount /proc"
 else
-  ok "/proc mounted"
+  ok "/proc healthy"
 fi
 
 apt-get update -qq
@@ -190,8 +192,8 @@ apt-get clean; rm -rf /var/lib/apt/lists/*
 # Swap: small boxes die on node/rust builds without it. Sized to RAM, capped
 # by free disk. SWAP_MB=0 disables; SWAP_MB=<n> forces.
 if [[ $SWAP_MB == auto ]]; then
-  if   (( MEM_MB < 2000 )); then SWAP_MB=2048
-  elif (( MEM_MB < 6000 )); then SWAP_MB=1024
+  if   (( MEM_MB < 1800 )); then SWAP_MB=2048
+  elif (( MEM_MB < 5500 )); then SWAP_MB=1024
   else                           SWAP_MB=0; fi
   (( DISK_FREE_GB < 4 )) && SWAP_MB=0
 fi
@@ -245,7 +247,7 @@ __cpus=$(nproc 2>/dev/null || echo 1)
 __mem=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null || echo 1024)
 export MAKEFLAGS="-j${__cpus}" CARGO_BUILD_JOBS="${__cpus}" UV_CONCURRENT_INSTALLS="${__cpus}"
 export NODE_OPTIONS="--max-old-space-size=$(( __mem * 6 / 10 ))"   # ~60% of RAM
-export AGENTBOX_TIER=$([ "$__mem" -lt 2000 ] && echo small || { [ "$__mem" -lt 6000 ] && echo medium || echo large; })
+export AGENTBOX_TIER=$([ "$__mem" -lt 1800 ] && echo small || { [ "$__mem" -lt 5500 ] && echo medium || echo large; })
 unset __cpus __mem
 export NPM_CONFIG_FUND=false NPM_CONFIG_UPDATE_NOTIFIER=false
 export GIT_EDITOR=true

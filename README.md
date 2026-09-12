@@ -44,7 +44,7 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | Step | What |
 |---|---|
 | Preflight | Mounts `/proc` if missing (Bun binaries need it), trusts Steel's egress CA system-wide, persists the CA env vars into `/etc/profile.d` for every user |
-| Sizing | Detects vCPU / RAM / disk. Tier `small` (<2 GB), `medium` (<6 GB), `large`. Creates a swapfile on small and medium boxes |
+| Sizing | Detects vCPU / RAM / disk. Tier `small` (<1.8 GB), `medium` (<5.5 GB), `large`. Creates a swapfile on small and medium boxes |
 | Packages | git, tmux, procps, jq, vim, htop, lsof, openssh-client, rsync, sudo, python3, node, npm, plus ripgrep, fd, bat, eza, fzf, zoxide, git-delta, gh, direnv. btop and neovim on medium/large |
 | User | `agent` with passwordless sudo, owns `/workspace`, shared history in `/commandhistory` |
 | Dotfiles | bash (color prompt, red for root and green for agent, big timestamped history, fzf and zoxide), tmux (mouse, vi keys, no plugins), git (delta, rebase pull, autoSetupRemote, worktree alias), vim, inputrc |
