@@ -18,13 +18,14 @@
 #  agentbox.sh — one-shot install + setup for a disposable agent VM/container
 #
 #  Turns a bare Debian/Ubuntu box (like a Steel sandbox) into a comfortable
-#  workspace for Claude Code + Codex CLI:
+#  workspace for Claude Code, Codex CLI, OpenCode and pi:
 #    • fixes the usual container quirks (/proc, CA certs, PATH persistence)
 #    • installs a lean modern CLI toolset (rg, fd, bat, eza, fzf, zoxide,
 #      delta, gh, jq, tmux, git, vim, htop, node, python3 …)
 #    • creates a non-root `agent` user with passwordless sudo, because
 #      `claude --dangerously-skip-permissions` refuses to run as root
-#    • installs Claude Code + Codex for that user (native installers, no npm)
+#    • installs Claude Code, Codex, OpenCode (native installers) and pi (npm on
+#      a user-level Node LTS, since Debian's Node 20 is too old) for that user
 #    • drops opinionated dotfiles: bash, tmux, git, inputrc, global CLAUDE.md
 #      / AGENTS.md, Claude settings, Codex config, agent aliases
 #    • adds helpers: work, agent-status, agentbox-verify, new-project, killport, sysinfo
@@ -153,11 +154,30 @@ done
 if [[ -n "$EGRESS_CA" ]]; then
   install -m 0644 "$EGRESS_CA" /usr/local/share/ca-certificates/sandbox-egress-ca.crt
   update-ca-certificates >/dev/null 2>&1 || true
+  # The sandbox sets per-tool CA variables to a bundle that holds only the
+  # egress CA. Most of those variables REPLACE the trust store, and the proxy
+  # passes some hosts through untouched (registry.npmjs.org, for one), so npm
+  # and friends then fail with "unable to get local issuer certificate".
+  # Point every path-valued variable at the system bundle instead: it now
+  # holds the egress CA and the public roots. NODE_EXTRA_CA_CERTS is additive
+  # and keeps the single egress CA. Runtimes with their own store get defaults.
+  SYS_BUNDLE=/etc/ssl/certs/ca-certificates.crt
   {
-    echo "# Egress CA env captured by agentbox.sh from the provisioning shell"
+    echo "# Egress CA env captured by agentbox.sh from the provisioning shell,"
+    echo "# path values redirected to the system bundle (egress CA + public roots)."
     env | grep -E '^(.*_CA_BUNDLE|.*CAINFO|.*CA_CERTS.*|.*CAFILE|.*CACERTS.*|.*_CERT|SSL_CERT_FILE|PIP_CERT|CONDA_SSL_VERIFY|DENO_TLS_CA_STORE|UV_NATIVE_TLS|.*_SSL_CA_FILE)=' \
-      | sort | sed 's/^/export /; s/=\(.*\)$/="\1"/'
+      | sort | sed 's/^/export /; s/=\(.*\)$/="\1"/' \
+      | sed -E "/^export NODE_EXTRA_CA_CERTS=/! s#=\"/[^\"]+\"#=\"$SYS_BUNDLE\"#"
+    echo "# Defaults for runtimes with their own trust store"
+    for v in SSL_CERT_FILE REQUESTS_CA_BUNDLE PIP_CERT NPM_CONFIG_CAFILE; do
+      [[ -n "${!v:-}" ]] || echo "export $v=$SYS_BUNDLE"
+    done
+    [[ -n "${NODE_EXTRA_CA_CERTS:-}" ]] || echo "export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sandbox-egress-ca.crt"
+    [[ -n "${UV_NATIVE_TLS:-}" ]] || echo "export UV_NATIVE_TLS=1"
   } > /etc/profile.d/00-agentbox-egress-ca.sh
+  # The rest of this script runs installers as $AGENT_USER through login shells,
+  # which read profile.d. Load it here too so nothing in this run misses it.
+  . /etc/profile.d/00-agentbox-egress-ca.sh
   chmod 0644 /etc/profile.d/00-agentbox-egress-ca.sh
   ok "trusted egress CA ($EGRESS_CA) and persisted CA env vars"
 else
@@ -350,6 +370,10 @@ alias tc-ping='tailcat ping --until-direct'
 alias cx='codex'
 alias cx-yolo='codex --dangerously-bypass-approvals-and-sandbox'
 alias cx-auto='codex --full-auto'
+# OpenCode (`oc`) and pi (`pi`) share the global AGENTS.md via symlinks.
+alias oc='opencode'
+alias oc-run='opencode run'     # headless: oc-run "prompt"
+alias pi-p='pi -p'              # headless: pi-p "prompt"
 if [ "$EUID" -eq 0 ] && id agent >/dev/null 2>&1; then
   alias become='cd / && exec su - agent'    # root -> agent user
 fi
@@ -478,7 +502,7 @@ ok "bash / tmux / git / vim / inputrc for $AGENT_USER and root"
 # =============================================================================
 hdr "6/10  Agent configs: CLAUDE.md, AGENTS.md, settings, Codex config"
 # =============================================================================
-mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.agentbox"
+mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.config/opencode" "$AGENT_HOME/.pi/agent" "$AGENT_HOME/.agentbox"
 
 cat > "$AGENT_HOME/.claude/CLAUDE.md" <<EOF
 # Global instructions for this agent VM
@@ -510,8 +534,10 @@ $( ((IS_STEEL)) && echo "- Outbound HTTPS goes through Steel's egress proxy; its
 - Follow the project's own CLAUDE.md / AGENTS.md when present; they override this file.
 - Before declaring done: run the project's tests/lint, and state plainly what was not verified.
 EOF
-# Codex reads AGENTS.md; keep one source of truth.
+# Codex, OpenCode and pi read a global AGENTS.md; keep one source of truth.
 ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.codex/AGENTS.md"
+ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.config/opencode/AGENTS.md"
+ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.pi/agent/AGENTS.md"
 
 # Claude Code user settings (merge-free: only written if absent so re-runs
 # don't clobber choices the user made from inside Claude).
@@ -565,11 +591,11 @@ for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GH_TOKEN GITHU
   fi
 done
 chmod 0600 "$ENVF"
-chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.agentbox"
-ok "CLAUDE.md, AGENTS.md (symlink), settings.json, codex config.toml"
+chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.config" "$AGENT_HOME/.pi" "$AGENT_HOME/.agentbox"
+ok "CLAUDE.md, AGENTS.md symlinks (codex, opencode, pi), settings.json, codex config.toml"
 
 # =============================================================================
-hdr "7/10  Install Claude Code + Codex for $AGENT_USER"
+hdr "7/10  Install Claude Code, Codex, OpenCode, pi for $AGENT_USER"
 # =============================================================================
 if as_agent 'test -x "$HOME/.local/bin/claude"'; then
   ok "claude already installed: $(as_agent '"$HOME/.local/bin/claude" --version 2>/dev/null | head -1')"
@@ -584,6 +610,44 @@ else
   as_agent 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' >/dev/null 2>&1 \
     && ok "codex installed: $(as_agent '"$HOME/.local/bin/codex" --version 2>/dev/null | head -1')" \
     || warn "Codex install failed (check network)"
+fi
+# OpenCode's installer puts the binary in ~/.opencode/bin and edits rc files
+# unless that dir is already on PATH. Keep PATH clean: pre-seed it, then link
+# the binary into ~/.local/bin next to the other agents.
+if as_agent 'test -x "$HOME/.local/bin/opencode"'; then
+  ok "opencode already installed: $(as_agent '"$HOME/.local/bin/opencode" --version 2>/dev/null | head -1')"
+else
+  as_agent 'export PATH="$HOME/.opencode/bin:$PATH"; curl -fsSL https://opencode.ai/install | bash && ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"' >/dev/null 2>&1 \
+    && ok "opencode installed: $(as_agent '"$HOME/.local/bin/opencode" --version 2>/dev/null | head -1')" \
+    || warn "OpenCode install failed (check network)"
+fi
+# pi needs Node >= 22.19 and Debian ships 20. Give $AGENT_USER the current Node
+# LTS from the official tarball (checksum verified) under ~/.local, ahead of
+# the system node on PATH. Root and apt keep the distro node.
+NODE_MAJOR=$(as_agent 'node -v 2>/dev/null' | sed -E 's/^v([0-9]+).*/\1/')
+if (( ${NODE_MAJOR:-0} >= 22 )); then
+  ok "node $(as_agent 'node -v') for $AGENT_USER"
+else
+  NODE_ARCH=$(uname -m); case "$NODE_ARCH" in x86_64) NODE_ARCH=x64;; aarch64) NODE_ARCH=arm64;; esac
+  NODE_VER=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version')
+  if [[ -n $NODE_VER ]] && as_agent "set -e; t=\$(mktemp -d); cd \"\$t\"
+      curl -fsSL -o node.tar.xz https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$NODE_ARCH.tar.xz
+      curl -fsSL https://nodejs.org/dist/$NODE_VER/SHASUMS256.txt | grep \" node-$NODE_VER-linux-$NODE_ARCH.tar.xz\$\" | sed 's# .*# node.tar.xz#' | sha256sum -c --quiet -
+      mkdir -p ~/.local && tar -xJf node.tar.xz -C ~/.local --strip-components=1 --exclude='*/CHANGELOG.md' --exclude='*/README.md' --exclude='*/LICENSE'
+      cd / && rm -rf \"\$t\"" >/dev/null 2>&1; then
+    ok "node $NODE_VER (LTS) installed for $AGENT_USER in ~/.local"
+  else
+    warn "node LTS install for $AGENT_USER failed; pi needs node >= 22"
+  fi
+fi
+# pi ships as an npm package. A user-level npm prefix puts its binary in
+# ~/.local/bin and lets the agent install other globals without sudo.
+if as_agent 'test -x "$HOME/.local/bin/pi"'; then
+  ok "pi already installed: $(as_agent '"$HOME/.local/bin/pi" --version 2>/dev/null | head -1')"
+else
+  as_agent 'npm config set prefix "$HOME/.local" && npm install -g --ignore-scripts @earendil-works/pi-coding-agent' >/dev/null 2>&1 \
+    && ok "pi installed: $(as_agent '"$HOME/.local/bin/pi" --version 2>/dev/null | head -1')" \
+    || warn "pi install failed (check network)"
 fi
 if [[ $WITH_DEV -eq 1 ]]; then
   as_agent 'command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null 2>&1 \
@@ -714,14 +778,19 @@ b() { printf '\e[1;34m%s\e[0m\n' "\$*"; }
 b "host";    echo "  \$(hostname)  \$(. /etc/os-release; echo \$PRETTY_NAME)  \$(uname -r)"
 b "load";    echo "  cpu=\$(nproc) load=\$(cut -d' ' -f1-3 /proc/loadavg) mem=\$(free -m | awk '/Mem/{print \$3"/"\$2" MB"}') disk=\$(df -h / | awk 'NR==2{print \$3"/"\$2}')"
 b "agents";
-for u in root $AGENT_USER; do
-  h=\$(getent passwd \$u | cut -d: -f6)
-  c=\$(\$h/.local/bin/claude --version 2>/dev/null | head -1 || echo "-")
-  x=\$(\$h/.local/bin/codex --version 2>/dev/null | head -1 || echo "-")
-  auth=\$([ -s \$h/.claude/.credentials.json ] && echo "claude:auth✔" || echo "claude:no-auth")
-  cauth=\$([ -s \$h/.codex/auth.json ] && echo "codex:auth✔" || echo "codex:no-auth")
-  printf '  %-6s claude=%-28s codex=%-22s %s %s\n' "\$u" "\$c" "\$x" "\$auth" "\$cauth"
-done
+# one line per agent for the agent user: version and whether an auth file exists.
+# Versions run as $AGENT_USER so pi finds the agent's Node LTS, not root's node.
+h=\$(getent passwd $AGENT_USER | cut -d: -f6)
+while read -r name authf; do
+  v=\$(su - $AGENT_USER -c "\$name --version 2>/dev/null" | head -1); [ -n "\$v" ] || v="(not installed)"
+  [ -s "\$h/\$authf" ] && a="auth✔" || a="no-auth"
+  printf '  %-9s %-34s %s\n' "\$name" "\$v" "\$a"
+done <<AGENTS
+claude .claude/.credentials.json
+codex .codex/auth.json
+opencode .local/share/opencode/auth.json
+pi .pi/agent/auth.json
+AGENTS
 b "tailcat"; if command -v tailcat >/dev/null; then
   echo "  $(tailcat version 2>/dev/null | head -1)  saved-keys: $(su - $AGENT_USER -c 'tailcat genkey --list 2>/dev/null' | tr '\n' ' ')"
   pgrep -af 'tailcat serve' | sed 's/^/  running: /' || true
@@ -783,7 +852,7 @@ ok "work, agent-status, new-project, killport, sysinfo"
 # The agents are installed for $AGENT_USER only. Root typing `claude` gets a
 # hint instead of "command not found". For other users the shim runs their own
 # ~/.local/bin copy, so it never shadows a real install in a login shell.
-for bin in claude codex; do
+for bin in claude codex opencode pi; do
   cat > "/usr/local/bin/$bin" <<EOF
 #!/usr/bin/env bash
 # $bin shim: point root at the agent user, run the caller's own install otherwise.
@@ -797,7 +866,7 @@ exit 127
 EOF
   chmod 0755 "/usr/local/bin/$bin"
 done
-ok "root shims for claude, codex"
+ok "root shims for claude, codex, opencode, pi"
 
 # agentbox-verify: the acceptance checks for this box. Runs as $AGENT_USER (root
 # is redirected) and exits non-zero on any failure. Values that depend on the
@@ -830,7 +899,8 @@ t "/proc works (bun requirement)"                    'test -r /proc/self/cmdline
 if grep -q '^/swapfile' /proc/swaps; then
   t "swapfile active"                                'awk "/SwapTotal/{exit (\$2+0)>0?0:1}" /proc/meminfo'
 else skp "swap (not configured on this tier)"; fi
-t "HTTPS egress with trusted CA"                     'curl -fsS -o /dev/null -w "%{http_code}" https://api.github.com/zen | grep -q 200'
+t "HTTPS egress with trusted CA (curl)"              'curl -fsS -o /dev/null -w "%{http_code}" https://api.github.com/zen | grep -q 200'
+t "HTTPS egress with trusted CA (npm, cafile)"       'npm view npm version 2>/dev/null | grep -qE "^[0-9]"'
 if [ -s /etc/profile.d/00-agentbox-egress-ca.sh ]; then
   t "egress CA env persisted in profile.d"           'grep -q "CA" /etc/profile.d/00-agentbox-egress-ca.sh'
 else skp "egress CA env (no sandbox CA on this box)"; fi
@@ -860,12 +930,18 @@ section "agents"
 t "claude binary executes"   'claude --version 2>/dev/null | grep -qi claude'
 t "codex binary executes"    'codex --version 2>/dev/null | grep -qi codex'
 t "claude --help parses"     'claude --help >/dev/null 2>&1'
-[ -s ~/.claude/.credentials.json ] && note "claude: signed in" || note "claude: not signed in (run 'claude' once)"
-[ -s ~/.codex/auth.json ]          && note "codex: signed in"  || note "codex: not signed in (run 'codex login' once)"
+t "node >= 22 for the agent user (pi needs it)"  'test "$(node -v | sed -E "s/^v([0-9]+).*/\1/")" -ge 22'
+t "opencode binary executes" 'opencode --version 2>/dev/null | grep -qE "[0-9]"'
+t "pi binary executes"       'pi --version 2>/dev/null | grep -qE "[0-9]"'
+[ -s ~/.claude/.credentials.json ]         && note "claude: signed in"   || note "claude: not signed in (run 'claude' once)"
+[ -s ~/.codex/auth.json ]                  && note "codex: signed in"    || note "codex: not signed in (run 'codex login' once)"
+[ -s ~/.local/share/opencode/auth.json ]   && note "opencode: signed in" || note "opencode: not signed in (run 'opencode auth login' once)"
+[ -s ~/.pi/agent/auth.json ]               && note "pi: signed in"       || note "pi: not signed in (run 'pi' then /login once)"
 
 section "agent configs"
 t "~/.claude/CLAUDE.md exists"                       'test -s ~/.claude/CLAUDE.md'
 t "~/.codex/AGENTS.md symlinks to CLAUDE.md"         'test "$(readlink ~/.codex/AGENTS.md)" = "$HOME/.claude/CLAUDE.md"'
+t "opencode and pi AGENTS.md symlink to CLAUDE.md"   'test "$(readlink ~/.config/opencode/AGENTS.md)" = "$HOME/.claude/CLAUDE.md" && test "$(readlink ~/.pi/agent/AGENTS.md)" = "$HOME/.claude/CLAUDE.md"'
 t "settings.json is valid JSON"                      'jq -e . ~/.claude/settings.json'
 t "settings.json denies .env reads"                  'jq -e "any(.permissions.deny[]?; test(\"\\\\.env\"))" ~/.claude/settings.json'
 t "codex config.toml exists"                         'test -s ~/.codex/config.toml'
@@ -874,7 +950,7 @@ t "git: pull.rebase true"                            'test "$(git config --globa
 t "git: push.autoSetupRemote true"                   'test "$(git config --global push.autoSetupRemote)" = true'
 
 section "interactive aliases (fresh bash -i)"
-for a in yolo cc cr tm tl tk gwt cx cx-yolo; do
+for a in yolo cc cr tm tl tk gwt cx cx-yolo oc oc-run pi-p; do
   t "alias: $a"  "bash -ic 'type $a' 2>/dev/null | grep -q ."
 done
 
@@ -917,6 +993,7 @@ cat > /etc/motd <<EOF
     become          switch root -> $AGENT_USER
     yolo | auto | plan | safe     Claude Code permission modes (non-root only)
     cx | cx-yolo    Codex CLI
+    oc | pi         OpenCode, pi   (headless: oc-run "..." / pi-p "...")
     vm-ssh          SSH into this VM from anywhere via tailcat (prints address)
     vm-share PORTS  expose local ports via tailcat  (laptop: tailcat forward <addr> 18080:8080)
     agent-status    versions, auth, tmux, ports
