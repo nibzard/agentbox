@@ -17,7 +17,7 @@
 
 # agentbox
 
-One bash script that turns a bare [Steel](https://steel.dev) sandbox VM (or any fresh Debian/Ubuntu box) into a ready-to-work environment for **Claude Code** and **Codex CLI**.
+One bash script that turns a bare [Steel](https://steel.dev) sandbox VM (or any fresh Debian/Ubuntu box) into a ready-to-work environment for **Claude Code**, **Codex CLI**, **OpenCode** and **pi**.
 
 Run it as root on a new VM. About two minutes later you have a non-root `agent` user, modern CLI tools, sane dotfiles, both agents installed and authenticated, and encrypted remote access via [tailcat](https://github.com/tailscale/tailcat). Re-running is safe: every step is idempotent.
 
@@ -48,7 +48,7 @@ agent-status      # versions, auth, tmux sessions, tailcat, ports
 agentbox-verify   # acceptance checks for the box, exits non-zero on failure
 ```
 
-Every interactive login outside tmux prints a short banner with these commands. Steel's sshd shows no motd on its own, so the shell prints it. Typing `claude` or `codex` as root prints a pointer to `work` instead of "command not found". The agents live in the agent user only.
+Every interactive login outside tmux prints a short banner with these commands. Steel's sshd shows no motd on its own, so the shell prints it. Typing `claude`, `codex`, `opencode` or `pi` as root prints a pointer to `work` instead of "command not found". The agents live in the agent user only.
 
 ### Copy and paste inside tmux
 
@@ -67,10 +67,10 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | Packages | git, tmux, procps, jq, vim, htop, lsof, openssh-client, rsync, sudo, python3, node, npm, plus ripgrep, fd, bat, eza, fzf, zoxide, git-delta, gh, direnv. btop and neovim on medium/large |
 | User | `agent` with passwordless sudo, owns `/workspace`, shared history in `/commandhistory` |
 | Dotfiles | bash (color prompt, red for root and green for agent, big timestamped history, fzf and zoxide), tmux (mouse, vi keys, no plugins), git (delta, rebase pull, autoSetupRemote, worktree alias), vim, inputrc |
-| Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as `~/.codex/AGENTS.md`. Claude `settings.json` with a read-only allowlist and denies for `.env` and `curl \| sh`. Codex `config.toml` |
-| Agents | Claude Code and Codex CLI via their native installers, as the agent user |
+| Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as the global `AGENTS.md` for Codex, OpenCode and pi. Claude `settings.json` with a read-only allowlist and denies for `.env` and `curl \| sh`. Codex `config.toml` |
+| Agents | Claude Code, Codex CLI and OpenCode via their native installers, pi via npm, all as the agent user. pi needs Node 22 and Debian ships 20, so the agent user gets the current Node LTS from the official tarball under `~/.local`, ahead of the system node. Sign-in: `claude`, `codex login`, `opencode auth login`, `pi` then `/login` |
 | tailcat | Installed from the GitHub release `.deb` with checksum verification. Persistent key for a stable address |
-| Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude` and `codex` that point at `work` |
+| Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude`, `codex`, `opencode` and `pi` that point at `work` |
 
 Build parallelism and Node heap size are set at every shell start from the current `nproc` and RAM, so a resized VM picks them up on the next login.
 
@@ -99,6 +99,8 @@ ANTHROPIC_API_KEY=... OPENAI_API_KEY=...  bash agentbox.sh   # seeded into ~/.ag
 | `cc` / `cr` | `claude --continue` / `claude --resume` |
 | `loop [prompt.md]` | Headless Claude loop over a prompt file |
 | `cx` / `cx-yolo` / `cx-auto` | Codex CLI, bypass, full-auto |
+| `oc` / `oc-run "..."` | OpenCode, headless run |
+| `pi` / `pi-p "..."` | pi, headless print mode |
 | `tm <name>` / `tl` / `tk` | tmux attach-or-create, list, kill |
 | `gwt <branch>` | Git worktree in a sibling directory, for parallel agents |
 | `become` | root only: switch to the agent user |
@@ -130,7 +132,7 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
 
 - **The clock is set at create time.** The default is one hour, the maximum is eight (`--timeout 28800`). There is no update call, so a box that is running out of time can only be checkpointed and restored with a new timeout.
 - **Use `--auto-pause`.** At the deadline the box pauses instead of stopping, and any command sent to it wakes it. A resume starts a fresh timeout window. `--idle-timeout 1800` pauses it after 30 minutes without traffic, so it costs nothing while you are away.
-- **Setup is cheap, sign-in is not.** The script rebuilds a box in about two minutes, so do not checkpoint a fresh install. Do checkpoint after `claude` and `codex login` have run once:
+- **Setup is cheap, sign-in is not.** The script rebuilds a box in about two minutes, so do not checkpoint a fresh install. Do checkpoint after the agents you use have signed in once (`claude`, `codex login`, `opencode auth login`, `pi` then `/login`):
 
   ```bash
   steel computer checkpoint --name authed --wait
@@ -149,6 +151,7 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
   ```
 
   Header injection is verified. Running Claude Code this way needs a placeholder `ANTHROPIC_API_KEY` so it sends the header at all, bills as API usage, and is not yet tested end to end. The `steel` CLI has no secrets or environments commands, so this is HTTP only for now.
+- **The egress proxy does not intercept every host.** Steel sets per-tool CA variables (`NPM_CONFIG_CAFILE`, `SSL_CERT_FILE`, `PIP_CERT` and more) to a bundle that holds only its egress CA. Hosts the proxy passes through, such as the npm registry, then fail TLS verification in npm, pip and anything else that treats the variable as the whole trust store. The script redirects those variables to the system bundle, which holds the egress CA and the public roots.
 - **ssh and exec live in different mount namespaces.** A fresh namespace has a stale `/proc` with no `/proc/self`, which breaks Bun-based Claude Code and `ss`. The script fixes the namespace it runs in, and every login shell fixes its own on start. `steel computer exec` runs `/bin/sh -c`, which reads no profile, so run agent commands there through a login shell: `steel computer exec -c 'bash -lc "..."'`. One healed session heals all later exec sessions on that box. `agentbox-verify` heals itself.
 - **Delete what you are done with.** Five computers per account. `steel computer quota` shows the count.
 
