@@ -48,7 +48,7 @@ agent-status      # versions, auth, tmux sessions, tailcat, ports
 agentbox-verify   # acceptance checks for the box, exits non-zero on failure
 ```
 
-Typing `claude` or `codex` as root prints a pointer to `work` instead of "command not found". The agents live in the agent user only.
+Every interactive login outside tmux prints a short banner with these commands. Steel's sshd shows no motd on its own, so the shell prints it. Typing `claude` or `codex` as root prints a pointer to `work` instead of "command not found". The agents live in the agent user only.
 
 ### Copy and paste inside tmux
 
