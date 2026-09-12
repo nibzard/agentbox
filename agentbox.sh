@@ -778,10 +778,11 @@ b() { printf '\e[1;34m%s\e[0m\n' "\$*"; }
 b "host";    echo "  \$(hostname)  \$(. /etc/os-release; echo \$PRETTY_NAME)  \$(uname -r)"
 b "load";    echo "  cpu=\$(nproc) load=\$(cut -d' ' -f1-3 /proc/loadavg) mem=\$(free -m | awk '/Mem/{print \$3"/"\$2" MB"}') disk=\$(df -h / | awk 'NR==2{print \$3"/"\$2}')"
 b "agents";
-# one line per agent for the agent user: version and whether an auth file exists
+# one line per agent for the agent user: version and whether an auth file exists.
+# Versions run as $AGENT_USER so pi finds the agent's Node LTS, not root's node.
 h=\$(getent passwd $AGENT_USER | cut -d: -f6)
 while read -r name authf; do
-  v=\$(\$h/.local/bin/\$name --version 2>/dev/null | head -1); [ -n "\$v" ] || v="(not installed)"
+  v=\$(su - $AGENT_USER -c "\$name --version 2>/dev/null" | head -1); [ -n "\$v" ] || v="(not installed)"
   [ -s "\$h/\$authf" ] && a="auth✔" || a="no-auth"
   printf '  %-9s %-34s %s\n' "\$name" "\$v" "\$a"
 done <<AGENTS
