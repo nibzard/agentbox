@@ -157,6 +157,14 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
 
 ## Tests
 
+Local regressions require Bash and Python 3, with no third-party packages, root access, credentials, or network:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+The local harness extracts selected generated shell templates from `agentbox.sh` and runs them with temporary homes and stub commands. It does not run the installer or establish live VM compatibility. Run live Steel E2E separately:
+
 `agentbox-verify` on the box is the acceptance suite: about 60 checks that the user, tools, agents, configs and helpers work, exercised rather than just present. `tests/e2e.sh` runs it the honest way: it creates a Steel computer, runs the script twice to prove idempotency, runs `agentbox-verify`, and deletes the box.
 
 ```bash
