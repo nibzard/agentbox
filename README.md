@@ -23,7 +23,16 @@ Run it as root on a new VM. About two minutes later you have a non-root `agent` 
 
 ## Quick start
 
-Bare Steel VMs ship without `curl`, so install it first:
+From your laptop, with the [Steel CLI](https://github.com/steel-dev/cli) installed. The script goes in over ssh, so the box needs nothing preinstalled:
+
+```bash
+steel computer create --wait --use --timeout 28800 --auto-pause
+git clone https://github.com/nibzard/agentbox && cd agentbox
+steel computer ssh -- bash -s < agentbox.sh
+steel computer ssh
+```
+
+Or from a root shell on the box. Bare Steel VMs ship without `curl`, so install it first:
 
 ```bash
 apt-get update && apt-get install -y ca-certificates curl
@@ -33,10 +42,17 @@ curl -fsSL https://raw.githubusercontent.com/nibzard/agentbox/main/agentbox.sh |
 Then:
 
 ```bash
-work            # tmux session as the agent user in /workspace
-yolo            # inside: claude --dangerously-skip-permissions
-agent-status    # versions, auth, tmux sessions, tailcat, ports
+work              # tmux session as the agent user in /workspace
+yolo              # inside: claude --dangerously-skip-permissions
+agent-status      # versions, auth, tmux sessions, tailcat, ports
+agentbox-verify   # acceptance checks for the box, exits non-zero on failure
 ```
+
+Typing `claude` or `codex` as root prints a pointer to `work` instead of "command not found". The agents live in the agent user only.
+
+### Copy and paste inside tmux
+
+tmux runs with the mouse on, so a drag selection copies into tmux and is sent to your local clipboard over OSC 52. iTerm2, Ghostty, WezTerm, kitty and Alacritty accept it (iTerm2 needs "Applications in terminal may access clipboard" enabled). Terminal.app does not. When the clipboard stays empty, either hold Option (macOS) or Shift (Linux) while selecting to bypass tmux, or press `C-b m` to turn the mouse off and select natively. Press `C-b m` again to turn it back on.
 
 ## Why a non-root user
 
@@ -54,7 +70,7 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as `~/.codex/AGENTS.md`. Claude `settings.json` with a read-only allowlist and denies for `.env` and `curl \| sh`. Codex `config.toml` |
 | Agents | Claude Code and Codex CLI via their native installers, as the agent user |
 | tailcat | Installed from the GitHub release `.deb` with checksum verification. Persistent key for a stable address |
-| Helpers | `work`, `agent-status`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share` |
+| Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude` and `codex` that point at `work` |
 
 Build parallelism and Node heap size are set at every shell start from the current `nproc` and RAM, so a resized VM picks them up on the next login.
 
@@ -108,6 +124,46 @@ tailcat forward <address> 18080:8080     # then open http://localhost:18080
 tailcat browse <address>                 # single web port, opens the browser
 ```
 
+## Running on Steel
+
+Facts about [Steel computers](https://computers-preview.apidocumentation.com) that shape how you use agentbox. Verified against the preview API on 2026-09-12.
+
+- **The clock is set at create time.** The default is one hour, the maximum is eight (`--timeout 28800`). There is no update call, so a box that is running out of time can only be checkpointed and restored with a new timeout.
+- **Use `--auto-pause`.** At the deadline the box pauses instead of stopping, and any command sent to it wakes it. A resume starts a fresh timeout window. `--idle-timeout 1800` pauses it after 30 minutes without traffic, so it costs nothing while you are away.
+- **Setup is cheap, sign-in is not.** The script rebuilds a box in about two minutes, so do not checkpoint a fresh install. Do checkpoint after `claude` and `codex login` have run once:
+
+  ```bash
+  steel computer checkpoint --name authed --wait
+  steel checkpoint restore <checkpoint-id> --timeout 28800 --auto-pause --wait --use
+  ```
+
+  A checkpoint holds the OAuth tokens. Anyone who can restore it is signed in as you.
+- **Keys without files.** Steel can inject a header into every request to a domain, at the egress proxy, so the secret never exists on the box. Store the key once, then create the box with a network secret:
+
+  ```bash
+  curl -s https://api.steel.dev/v1/secrets -H "steel-api-key: $STEEL_API_KEY" \
+    -H 'content-type: application/json' -d '{"name":"anthropic","value":"sk-ant-..."}'
+  curl -s https://api.steel.dev/v1/computers -H "steel-api-key: $STEEL_API_KEY" \
+    -H 'content-type: application/json' -d '{"timeoutSeconds":28800,"autoPause":true,
+      "networkSecrets":[{"secretId":"<id>","domain":"api.anthropic.com","header":"x-api-key","template":"{{secret}}"}]}'
+  ```
+
+  Header injection is verified. Running Claude Code this way needs a placeholder `ANTHROPIC_API_KEY` so it sends the header at all, bills as API usage, and is not yet tested end to end. The `steel` CLI has no secrets or environments commands, so this is HTTP only for now.
+- **ssh and exec live in different mount namespaces.** A fresh namespace has a stale `/proc` with no `/proc/self`, which breaks Bun-based Claude Code and `ss`. The script fixes the namespace it runs in, and every login shell fixes its own on start. `steel computer exec` runs `/bin/sh -c`, which reads no profile, so run agent commands there through a login shell: `steel computer exec -c 'bash -lc "..."'`. One healed session heals all later exec sessions on that box. `agentbox-verify` heals itself.
+- **Delete what you are done with.** Five computers per account. `steel computer quota` shows the count.
+
+## Tests
+
+`agentbox-verify` on the box is the acceptance suite: about 60 checks that the user, tools, agents, configs and helpers work, exercised rather than just present. `tests/e2e.sh` runs it the honest way: it creates a Steel computer, runs the script twice to prove idempotency, runs `agentbox-verify`, and deletes the box.
+
+```bash
+export STEEL_API_KEY=ste-...
+tests/e2e.sh                              # full cycle, about four minutes
+KEEP=1 tests/e2e.sh                       # leave the box running
+COMPUTER_ID=cmp_... tests/e2e.sh          # against a box you already have
+AGENTBOX_ARGS="--lean --no-tailcat" tests/e2e.sh
+```
+
 ## Security notes
 
 - Copying root's OAuth credentials into the agent user means anything the agent runs can read them. Fine for a throwaway VM. Use `--no-copy-auth` for anything longer-lived.
@@ -117,7 +173,7 @@ tailcat browse <address>                 # single web port, opens the browser
 
 ## Requirements
 
-Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS, and `curl` + `ca-certificates` installed (not present on bare Steel VMs — see Quick start). Tested on Steel sandbox VMs (Debian 13, 1 vCPU, 1 GB). Works on x86_64 and arm64.
+Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS. `curl` and `ca-certificates` are needed only for the `curl | bash` path; the ssh path installs them. Tested on Steel sandbox VMs (Debian 13) from 1 vCPU / 1 GB to 4 vCPU / 4 GB. Works on x86_64 and arm64.
 
 ## Credits
 

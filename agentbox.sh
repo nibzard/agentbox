@@ -27,7 +27,7 @@
 #    • installs Claude Code + Codex for that user (native installers, no npm)
 #    • drops opinionated dotfiles: bash, tmux, git, inputrc, global CLAUDE.md
 #      / AGENTS.md, Claude settings, Codex config, agent aliases
-#    • adds helpers: work, agent-status, new-project, killport, sysinfo
+#    • adds helpers: work, agent-status, agentbox-verify, new-project, killport, sysinfo
 #    • optionally copies root's existing Claude login into the agent user
 #
 #  Usage (as root):
@@ -72,6 +72,7 @@ done
 c_blue=$'\e[1;34m'; c_green=$'\e[1;32m'; c_yellow=$'\e[1;33m'; c_red=$'\e[1;31m'; c_off=$'\e[0m'
 hdr()  { printf '\n%s==> %s%s\n' "$c_blue" "$*" "$c_off"; }
 ok()   { printf '%s  ✔ %s%s\n' "$c_green" "$*" "$c_off"; }
+info() { printf '  · %s\n' "$*"; }
 warn() { printf '%s  ! %s%s\n' "$c_yellow" "$*" "$c_off"; }
 die()  { printf '%s  ✘ %s%s\n' "$c_red" "$*" "$c_off" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -111,6 +112,20 @@ printf '%s' "$c_blue"; cat <<'LOGO'
 LOGO
 printf '%s\n           agentbox  ·  agent VM setup for Steel sandboxes\n\n' "$c_off"
 
+# ---------- /proc (before anything reads it) --------------------------------
+# Bun-based binaries (Claude Code) need a *working* procfs. On fresh Steel VMs
+# /proc is mounted but stale (no /proc/self), so `mountpoint` passes while Bun
+# aborts with "panic(main thread)" and `df` cannot read the mount table. Test
+# /proc/self and remount over it before the sizing step reads /proc.
+# The remount is per mount namespace: Steel gives ssh sessions and exec
+# sessions different ones. Login shells repeat this check (step 4) so the
+# other namespace heals on first use.
+if [[ ! -e /proc/self/mounts ]]; then
+  mount -t proc proc /proc && ok "remounted /proc (was stale: no /proc/self)" || warn "could not mount /proc"
+else
+  ok "/proc healthy"
+fi
+
 # ---------- machine sizing (Steel VMs come as 1/2/4 vCPU with varying RAM/disk)
 CPUS=$(nproc)
 MEM_MB=$(awk '/MemTotal/{printf "%d", $2/1024}' /proc/meminfo)
@@ -123,17 +138,8 @@ SWAP_MB="${SWAP_MB:-auto}"     # auto | 0 | <MB>
 printf '  machine: %s vCPU, %s MB RAM, %s GB free, tier=%s, steel=%s\n' "$CPUS" "$MEM_MB" "$DISK_FREE_GB" "$TIER" "$IS_STEEL"
 
 # =============================================================================
-hdr "1/10  Preflight: /proc, apt, CA certificates"
+hdr "1/10  Preflight: apt, CA certificates"
 # =============================================================================
-# Bun-based binaries (Claude Code) need a *working* procfs. On fresh Steel VMs
-# /proc is mounted but stale (no /proc/self), so `mountpoint` passes while Bun
-# aborts with "panic(main thread)". Test /proc/self and remount over it.
-if [[ ! -e /proc/self/mounts ]]; then
-  mount -t proc proc /proc && ok "remounted /proc (was stale: no /proc/self)" || warn "could not mount /proc"
-else
-  ok "/proc healthy"
-fi
-
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg >/dev/null
 ok "apt ready"
@@ -182,6 +188,8 @@ for p in "${PKGS[@]}"; do
   if apt-cache show "$p" >/dev/null 2>&1; then TO_INSTALL+=("$p"); else warn "skip $p (not in repo)"; fi
 done
 if ((${#TO_INSTALL[@]})); then
+  # apt output is hidden, so say up front that this step is the slow one.
+  info "installing ${#TO_INSTALL[@]} packages, the slowest step (about 1-2 minutes, apt output hidden)"
   apt-get install -y -qq --no-install-recommends "${TO_INSTALL[@]}" >/dev/null
   ok "installed: ${TO_INSTALL[*]}"
 else
@@ -237,6 +245,13 @@ hdr "4/10  System-wide shell defaults (/etc/profile.d)"
 # =============================================================================
 cat > /etc/profile.d/10-agentbox.sh <<'EOF'
 # agentbox: shared defaults for every login shell (root and agent user)
+# Steel runs ssh and exec sessions in separate mount namespaces, and a fresh
+# one has a stale /proc (no /proc/self). Bun (Claude Code) and ss need it.
+# Mount it once per namespace; the agent user has passwordless sudo for this.
+if [ ! -e /proc/self/mounts ]; then
+  if [ "$(id -u)" -eq 0 ]; then mount -t proc proc /proc 2>/dev/null
+  else sudo -n mount -t proc proc /proc 2>/dev/null; fi
+fi
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH";; esac
 export EDITOR=vim VISUAL=vim PAGER=less LESS='-R -F -X'
 export LANG="${LANG:-C.UTF-8}" LC_ALL="${LC_ALL:-C.UTF-8}"
@@ -372,7 +387,12 @@ setw -g pane-base-index 1
 set -g renumber-windows on
 set -s escape-time 10
 set -g focus-events on
+# Copy from a mouse selection reaches the local clipboard over OSC 52. The
+# outer terminal (through steel ssh) does not advertise the capability, so
+# declare it. Terminals without OSC 52 support: use prefix+m and select natively.
 set -g set-clipboard on
+set -as terminal-features ',*:clipboard'
+bind m set -g mouse \; display "mouse #{?mouse,on,off}"
 setw -g mode-keys vi
 set -g status-interval 5
 set -g status-style "bg=colour236,fg=colour250"
@@ -753,6 +773,132 @@ printf '%-8s %s\n' host "$(hostname)" os "$(. /etc/os-release; echo $PRETTY_NAME
 EOF
 chmod 0755 /usr/local/bin/{work,agent-status,new-project,killport,sysinfo}
 ok "work, agent-status, new-project, killport, sysinfo"
+
+# The agents are installed for $AGENT_USER only. Root typing `claude` gets a
+# hint instead of "command not found". For other users the shim runs their own
+# ~/.local/bin copy, so it never shadows a real install in a login shell.
+for bin in claude codex; do
+  cat > "/usr/local/bin/$bin" <<EOF
+#!/usr/bin/env bash
+# $bin shim: point root at the agent user, run the caller's own install otherwise.
+if [ "\$(id -u)" -eq 0 ]; then
+  echo "$bin is installed for the '$AGENT_USER' user, not root. Run 'work' (tmux as $AGENT_USER) and then '$bin'." >&2
+  exit 1
+fi
+[ -x "\$HOME/.local/bin/$bin" ] && exec "\$HOME/.local/bin/$bin" "\$@"
+echo "$bin is not installed for \$(id -un). Re-run agentbox.sh as root." >&2
+exit 127
+EOF
+  chmod 0755 "/usr/local/bin/$bin"
+done
+ok "root shims for claude, codex"
+
+# agentbox-verify: the acceptance checks for this box. Runs as $AGENT_USER (root
+# is redirected) and exits non-zero on any failure. Values that depend on the
+# install go in the first block; the checks themselves are a quoted heredoc.
+cat > /usr/local/bin/agentbox-verify <<EOF
+#!/usr/bin/env bash
+# ABOUTME: Acceptance checks for a box set up by agentbox.sh: system, user, tools, agents, configs, helpers.
+# ABOUTME: Run as the agent user (root is redirected). Exits non-zero when any check fails.
+AGENT_USER=$AGENT_USER
+WORKSPACE=$WORKSPACE
+EOF
+cat >> /usr/local/bin/agentbox-verify <<'EOF'
+# A fresh exec session can have a stale /proc (see /etc/profile.d/10-agentbox.sh).
+[ -e /proc/self/mounts ] || mount -t proc proc /proc 2>/dev/null || sudo -n mount -t proc proc /proc 2>/dev/null
+[ "$(id -u)" -eq 0 ] && exec su - "$AGENT_USER" -c "agentbox-verify $*"
+pass=0; fail=0; skip=0
+ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
+skp()  { printf '  \033[33mSKIP\033[0m %s\n' "$1"; skip=$((skip+1)); }
+note() { printf '  \033[34mINFO\033[0m %s\n' "$1"; }
+# t <label> <shell snippet>: PASS when the snippet exits 0. Runs in a subshell so
+# an `exit` inside the snippet cannot end the suite.
+t() { if (eval "$2") >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
+section() { printf '\n\033[1;34m== %s ==\033[0m\n' "$1"; }
+cleanup() { tmux kill-session -t abverify 2>/dev/null; rm -rf "$WORKSPACE/ab-verify-selftest"; }
+trap cleanup EXIT
+
+section "system"
+t "/proc works (bun requirement)"                    'test -r /proc/self/cmdline'
+if grep -q '^/swapfile' /proc/swaps; then
+  t "swapfile active"                                'awk "/SwapTotal/{exit (\$2+0)>0?0:1}" /proc/meminfo'
+else skp "swap (not configured on this tier)"; fi
+t "HTTPS egress with trusted CA"                     'curl -fsS -o /dev/null -w "%{http_code}" https://api.github.com/zen | grep -q 200'
+if [ -s /etc/profile.d/00-agentbox-egress-ca.sh ]; then
+  t "egress CA env persisted in profile.d"           'grep -q "CA" /etc/profile.d/00-agentbox-egress-ca.sh'
+else skp "egress CA env (no sandbox CA on this box)"; fi
+t "/etc/profile.d/10-agentbox.sh present"            'test -s /etc/profile.d/10-agentbox.sh'
+t "/etc/motd present"                                'test -s /etc/motd'
+
+section "agent user and workspace"
+t "running as non-root '$AGENT_USER'"                'test "$(id -un)" = "$AGENT_USER"'
+t "passwordless sudo"                                'sudo -n true'
+t "$WORKSPACE owned by $AGENT_USER"                  'test "$(stat -c %U "$WORKSPACE")" = "$AGENT_USER"'
+t "shared history file writable"                     'test -w /commandhistory/.bash_history'
+t "HISTFILE points at shared history (interactive)"  'bash -ic "echo \$HISTFILE" 2>/dev/null | grep -q "^/commandhistory/.bash_history$"'
+t "NODE_OPTIONS heap sized from RAM"                 'case "$NODE_OPTIONS" in *max-old-space-size=*) exit 0;; *) exit 1;; esac'
+t "AGENTBOX_TIER exported"                           'test -n "$AGENTBOX_TIER"'
+
+section "CLI tools on PATH"
+for c in git tmux jq rsync sqlite3 node python3; do
+  t "$c" "command -v $c"
+done
+for c in rg fd bat eza fzf zoxide delta gh direnv nvim btop; do
+  if command -v "$c" >/dev/null 2>&1; then ok "$c"; else skp "$c (not installed: --lean or small tier)"; fi
+done
+t "node runs"            'node --version | grep -q v'
+t "python3 runs"         'python3 -c "print(6*7)" | grep -q 42'
+
+section "agents"
+t "claude binary executes"   'claude --version 2>/dev/null | grep -qi claude'
+t "codex binary executes"    'codex --version 2>/dev/null | grep -qi codex'
+t "claude --help parses"     'claude --help >/dev/null 2>&1'
+[ -s ~/.claude/.credentials.json ] && note "claude: signed in" || note "claude: not signed in (run 'claude' once)"
+[ -s ~/.codex/auth.json ]          && note "codex: signed in"  || note "codex: not signed in (run 'codex login' once)"
+
+section "agent configs"
+t "~/.claude/CLAUDE.md exists"                       'test -s ~/.claude/CLAUDE.md'
+t "~/.codex/AGENTS.md symlinks to CLAUDE.md"         'test "$(readlink ~/.codex/AGENTS.md)" = "$HOME/.claude/CLAUDE.md"'
+t "settings.json is valid JSON"                      'jq -e . ~/.claude/settings.json'
+t "settings.json denies .env reads"                  'jq -e "any(.permissions.deny[]?; test(\"\\\\.env\"))" ~/.claude/settings.json'
+t "codex config.toml exists"                         'test -s ~/.codex/config.toml'
+t "git: delta as pager"                              'test "$(git config --global core.pager)" = delta'
+t "git: pull.rebase true"                            'test "$(git config --global pull.rebase)" = true'
+t "git: push.autoSetupRemote true"                   'test "$(git config --global push.autoSetupRemote)" = true'
+
+section "interactive aliases (fresh bash -i)"
+for a in yolo cc cr tm tl tk gwt cx cx-yolo; do
+  t "alias: $a"  "bash -ic 'type $a' 2>/dev/null | grep -q ."
+done
+
+section "helpers, exercised"
+t "tmux can create a session"                        'tmux new -d -s abverify && tmux has -t abverify'
+t "new-project scaffolds a git repo"                 'new-project ab-verify-selftest >/dev/null && d="$WORKSPACE/ab-verify-selftest" && test -d "$d/.git" && test -L "$d/AGENTS.md" && test -f "$d/CLAUDE.md" && test -f "$d/.gitignore"'
+t "new-project made an initial commit"               'test "$(git -C "$WORKSPACE/ab-verify-selftest" rev-list --count HEAD)" -ge 1'
+t "killport kills a listener"                        'setsid python3 -m http.server 18123 --bind 127.0.0.1 >/dev/null 2>&1 & sleep 1; ss -tln "sport = :18123" | grep -q 18123 && killport 18123 >/dev/null 2>&1; sleep 0.5; ! ss -tln "sport = :18123" | grep -q 18123'
+t "sysinfo runs"                                     'sysinfo | grep -q host'
+t "agent-status runs"                                'agent-status | grep -q agents'
+t "work helper installed"                            'command -v work'
+t "vm-ssh and vm-share installed"                    'command -v vm-ssh && command -v vm-share'
+t "root shim: claude tells root what to do"          'sudo -n /usr/local/bin/claude 2>&1 | grep -q "work"'
+
+section "tailcat"
+if command -v tailcat >/dev/null 2>&1; then
+  t "tailcat runs"                                   'tailcat version 2>/dev/null | grep -q .'
+  t "persistent default key exists"                  'test -s ~/.config/tailcat/keys/default.private.json'
+else skp "tailcat (--no-tailcat)"; fi
+
+section "root-side wiring (via sudo)"
+t "root bashrc has become alias"                     'sudo -n grep -q "alias become" /root/.bashrc'
+t "helpers in /usr/local/bin"                        'for h in work agent-status agentbox-verify new-project killport sysinfo; do test -x /usr/local/bin/$h || exit 1; done'
+
+printf '\n\033[1m%s\033[0m\n' "----------------------------------------"
+printf '\033[1m%s passed, %s failed, %s skipped\033[0m\n' "$pass" "$fail" "$skip"
+test "$fail" -eq 0
+EOF
+chmod 0755 /usr/local/bin/agentbox-verify
+ok "agentbox-verify"
 
 # =============================================================================
 hdr "10/10 Login experience"
