@@ -147,13 +147,55 @@ ok "apt ready"
 
 # Steel (and similar sandboxes) inject an egress CA via env vars. Trust it
 # system-wide and persist those vars for every user/login shell.
-EGRESS_CA=""
-for cand in "${NODE_EXTRA_CA_CERTS:-}" "${SSL_CERT_FILE:-}" /run/steel/egress-ca.crt; do
-  [[ -n "$cand" && -s "$cand" ]] && { EGRESS_CA="$cand"; break; }
-done
+# CA persistence helpers.
+detect_egress_ca() {
+  local cand
+  EGRESS_CA=
+  for cand in "$@"; do
+    if [[ -n "$cand" && -s "$cand" ]]; then EGRESS_CA=$cand; break; fi
+  done
+}
+ca_export() {
+  local name=$1 value=$2
+  value=${value//\'/\'\\\'\'}
+  printf "export %s='%s'\n" "$name" "$value"
+}
+emit_ca_profile() {
+  local bundle=$1 additive=$2 name value
+  printf '%s\n' '# CA paths use the system bundle (egress CA + public roots).' || return 1
+  while IFS= read -r name; do
+    case $name in
+      *_CA_BUNDLE|*CAINFO|*CA_CERTS*|*CAFILE|*CACERTS*|*_CERT|SSL_CERT_FILE|PIP_CERT|CONDA_SSL_VERIFY|DENO_TLS_CA_STORE|UV_NATIVE_TLS|*_SSL_CA_FILE)
+        [[ $name =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || return 1
+        value=${!name}
+        if [[ $name != NODE_EXTRA_CA_CERTS && $value == /* ]]; then value=$bundle; fi
+        ca_export "$name" "$value" || return 1
+        ;;
+    esac
+  done < <(compgen -e)
+  for name in SSL_CERT_FILE REQUESTS_CA_BUNDLE PIP_CERT NPM_CONFIG_CAFILE; do
+    if [[ -z ${!name:-} ]]; then ca_export "$name" "$bundle" || return 1; fi
+  done
+  if [[ -z ${NODE_EXTRA_CA_CERTS:-} ]]; then ca_export NODE_EXTRA_CA_CERTS "$additive" || return 1; fi
+  if [[ -z ${UV_NATIVE_TLS:-} ]]; then ca_export UV_NATIVE_TLS 1 || return 1; fi
+  return 0
+}
+persist_ca_profile() {
+  local profile=$1 bundle=$2 additive=$3 temporary
+  temporary=$(mktemp "${profile}.tmp.XXXXXXXXXX") || return 1
+  if emit_ca_profile "$bundle" "$additive" > "$temporary" \
+      && sh -n "$temporary" && chmod 0644 "$temporary" && mv -f -- "$temporary" "$profile"; then
+    return 0
+  else
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+# End CA persistence helpers.
+detect_egress_ca "${NODE_EXTRA_CA_CERTS:-}" "${SSL_CERT_FILE:-}" /run/steel/egress-ca.crt
 if [[ -n "$EGRESS_CA" ]]; then
   install -m 0644 "$EGRESS_CA" /usr/local/share/ca-certificates/sandbox-egress-ca.crt
-  update-ca-certificates >/dev/null 2>&1 || true
+  update-ca-certificates >/dev/null
   # The sandbox sets per-tool CA variables to a bundle that holds only the
   # egress CA. Most of those variables REPLACE the trust store, and the proxy
   # passes some hosts through untouched (registry.npmjs.org, for one), so npm
@@ -162,19 +204,8 @@ if [[ -n "$EGRESS_CA" ]]; then
   # holds the egress CA and the public roots. NODE_EXTRA_CA_CERTS is additive
   # and keeps the single egress CA. Runtimes with their own store get defaults.
   SYS_BUNDLE=/etc/ssl/certs/ca-certificates.crt
-  {
-    echo "# Egress CA env captured by agentbox.sh from the provisioning shell,"
-    echo "# path values redirected to the system bundle (egress CA + public roots)."
-    env | grep -E '^(.*_CA_BUNDLE|.*CAINFO|.*CA_CERTS.*|.*CAFILE|.*CACERTS.*|.*_CERT|SSL_CERT_FILE|PIP_CERT|CONDA_SSL_VERIFY|DENO_TLS_CA_STORE|UV_NATIVE_TLS|.*_SSL_CA_FILE)=' \
-      | sort | sed 's/^/export /; s/=\(.*\)$/="\1"/' \
-      | sed -E "/^export NODE_EXTRA_CA_CERTS=/! s#=\"/[^\"]+\"#=\"$SYS_BUNDLE\"#"
-    echo "# Defaults for runtimes with their own trust store"
-    for v in SSL_CERT_FILE REQUESTS_CA_BUNDLE PIP_CERT NPM_CONFIG_CAFILE; do
-      [[ -n "${!v:-}" ]] || echo "export $v=$SYS_BUNDLE"
-    done
-    [[ -n "${NODE_EXTRA_CA_CERTS:-}" ]] || echo "export NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/sandbox-egress-ca.crt"
-    [[ -n "${UV_NATIVE_TLS:-}" ]] || echo "export UV_NATIVE_TLS=1"
-  } > /etc/profile.d/00-agentbox-egress-ca.sh
+  persist_ca_profile /etc/profile.d/00-agentbox-egress-ca.sh "$SYS_BUNDLE" \
+    /usr/local/share/ca-certificates/sandbox-egress-ca.crt
   # The rest of this script runs installers as $AGENT_USER through login shells,
   # which read profile.d. Load it here too so nothing in this run misses it.
   . /etc/profile.d/00-agentbox-egress-ca.sh
@@ -687,9 +718,14 @@ if [[ $WITH_TAILCAT -eq 1 ]]; then
   TC_ARCH=$(dpkg --print-architecture)            # amd64 | arm64 | armhf
   [[ $TC_ARCH == armhf ]] && TC_ARCH=armv7
   if [[ $TAILCAT_VERSION == latest ]]; then
-    TAILCAT_VERSION=$(curl -fsSL https://api.github.com/repos/tailscale/tailcat/releases/latest 2>/dev/null \
-                      | jq -r '.tag_name // empty' | sed 's/^v//')
-    [[ -n $TAILCAT_VERSION ]] || { TAILCAT_VERSION=0.6.0; warn "GitHub API unreachable, pinning tailcat $TAILCAT_VERSION"; }
+    if TC_TAG=$(curl -fsSL https://api.github.com/repos/tailscale/tailcat/releases/latest 2>/dev/null) \
+        && TC_TAG=$(printf '%s' "$TC_TAG" | jq -er '.tag_name | select(type == "string")') \
+        && [[ $TC_TAG =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+      TAILCAT_VERSION=${TC_TAG#v}
+    else
+      TAILCAT_VERSION=0.6.0
+      warn "GitHub release lookup failed, pinning tailcat $TAILCAT_VERSION"
+    fi
   fi
   INSTALLED_TC=$(dpkg-query -W -f='${Version}' tailcat 2>/dev/null || true)
   if [[ $INSTALLED_TC == "$TAILCAT_VERSION" ]]; then
