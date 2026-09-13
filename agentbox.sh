@@ -891,8 +891,84 @@ note() { printf '  \033[34mINFO\033[0m %s\n' "$1"; }
 # an `exit` inside the snippet cannot end the suite.
 t() { if (eval "$2") >/dev/null 2>&1; then ok "$1"; else bad "$1"; fi; }
 section() { printf '\n\033[1;34m== %s ==\033[0m\n' "$1"; }
-cleanup() { tmux kill-session -t abverify 2>/dev/null; rm -rf "$WORKSPACE/ab-verify-selftest"; }
+# Verifier resource helpers: acquisition must run in the parent shell.
+verify_tmp=; verify_session=; session_owned=0; listener_pid=; listener_port=
+cleanup() {
+  local status=$?
+  trap - EXIT INT TERM
+  if [ -n "$listener_pid" ]; then
+    kill "$listener_pid" 2>/dev/null || true
+    wait "$listener_pid" 2>/dev/null || true
+  fi
+  if [ "$session_owned" -eq 1 ]; then tmux kill-session -t "$verify_session" 2>/dev/null || true; fi
+  if [ -n "$verify_tmp" ]; then rm -rf -- "$verify_tmp"; fi
+  return "$status"
+}
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+allocate_resources() {
+  verify_tmp=$(mktemp -d "$WORKSPACE/.agentbox-verify.XXXXXXXXXX") || return 1
+  verify_session="abverify-${verify_tmp##*.}"
+  project_dir="$verify_tmp/project"
+}
+create_session() {
+  tmux new -d -s "$verify_session" || return 1
+  session_owned=1
+  tmux has -t "$verify_session"
+}
+check_listener() {
+  local attempt owners
+  python3 - "$verify_tmp/port" <<'PYLISTENER' >/dev/null 2>&1 &
+import socket
+import sys
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    with open(sys.argv[1], "w") as ready:
+        ready.write(str(listener.getsockname()[1]) + "\n")
+    while True:
+        connection, _ = listener.accept()
+        connection.close()
+PYLISTENER
+  listener_pid=$!
+  for ((attempt=0; attempt<50; attempt++)); do
+    kill -0 "$listener_pid" 2>/dev/null || return 1
+    [ -s "$verify_tmp/port" ] && break
+    sleep 0.1
+  done
+  [ -s "$verify_tmp/port" ] || return 1
+  read -r listener_port < "$verify_tmp/port"
+  [[ "$listener_port" =~ ^[0-9]+$ ]] && [ "$listener_port" -gt 0 ] && [ "$listener_port" -le 65535 ] || return 1
+  owners=$(ss -H -tlnp "sport = :$listener_port") || return 1
+  owners=$(printf '%s\n' "$owners" | grep -o 'pid=[0-9]*' | sort -u)
+  [ "$owners" = "pid=$listener_pid" ] || return 1
+  kill -0 "$listener_pid" 2>/dev/null || return 1
+  killport "$listener_port" >/dev/null 2>&1 || return 1
+  for ((attempt=0; attempt<50; attempt++)); do
+    if ! kill -0 "$listener_pid" 2>/dev/null; then
+      wait "$listener_pid" 2>/dev/null || true
+      listener_pid=
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+command_matches() {
+  local pattern=$1 output
+  shift
+  output=$("$@" 2>/dev/null) || return 1
+  printf '%s\n' "$output" | grep -qiE "$pattern"
+}
+check_alias() { bash -ic "type $1" >/dev/null 2>&1; }
+check_pager() {
+  local expected=less
+  command -v delta >/dev/null 2>&1 && expected=delta
+  [ "$(git config --global core.pager)" = "$expected" ]
+}
+# End verifier resource helpers.
+allocate_resources || { bad "cannot allocate verifier temporary directory"; exit 1; }
 
 section "system"
 t "/proc works (bun requirement)"                    'test -r /proc/self/cmdline'
@@ -923,16 +999,16 @@ done
 for c in rg fd bat eza fzf zoxide delta gh direnv nvim btop; do
   if command -v "$c" >/dev/null 2>&1; then ok "$c"; else skp "$c (not installed: --lean or small tier)"; fi
 done
-t "node runs"            'node --version | grep -q v'
-t "python3 runs"         'python3 -c "print(6*7)" | grep -q 42'
+t "node runs"            'command_matches v node --version'
+t "python3 runs"         'command_matches 42 python3 -c "print(6*7)"'
 
 section "agents"
-t "claude binary executes"   'claude --version 2>/dev/null | grep -qi claude'
-t "codex binary executes"    'codex --version 2>/dev/null | grep -qi codex'
+t "claude binary executes"   'command_matches "claude" claude --version'
+t "codex binary executes"    'command_matches "codex" codex --version'
 t "claude --help parses"     'claude --help >/dev/null 2>&1'
 t "node >= 22 for the agent user (pi needs it)"  'test "$(node -v | sed -E "s/^v([0-9]+).*/\1/")" -ge 22'
-t "opencode binary executes" 'opencode --version 2>/dev/null | grep -qE "[0-9]"'
-t "pi binary executes"       'pi --version 2>/dev/null | grep -qE "[0-9]"'
+t "opencode binary executes" 'command_matches "[0-9]" opencode --version'
+t "pi binary executes"       'command_matches "[0-9]" pi --version'
 [ -s ~/.claude/.credentials.json ]         && note "claude: signed in"   || note "claude: not signed in (run 'claude' once)"
 [ -s ~/.codex/auth.json ]                  && note "codex: signed in"    || note "codex: not signed in (run 'codex login' once)"
 [ -s ~/.local/share/opencode/auth.json ]   && note "opencode: signed in" || note "opencode: not signed in (run 'opencode auth login' once)"
@@ -945,20 +1021,20 @@ t "opencode and pi AGENTS.md symlink to CLAUDE.md"   'test "$(readlink ~/.config
 t "settings.json is valid JSON"                      'jq -e . ~/.claude/settings.json'
 t "settings.json denies .env reads"                  'jq -e "any(.permissions.deny[]?; test(\"\\\\.env\"))" ~/.claude/settings.json'
 t "codex config.toml exists"                         'test -s ~/.codex/config.toml'
-t "git: delta as pager"                              'test "$(git config --global core.pager)" = delta'
+t "git: configured pager"                           'check_pager'
 t "git: pull.rebase true"                            'test "$(git config --global pull.rebase)" = true'
 t "git: push.autoSetupRemote true"                   'test "$(git config --global push.autoSetupRemote)" = true'
 
 section "interactive aliases (fresh bash -i)"
 for a in yolo cc cr tm tl tk gwt cx cx-yolo oc oc-run pi-p; do
-  t "alias: $a"  "bash -ic 'type $a' 2>/dev/null | grep -q ."
+  t "alias: $a"  "check_alias $a"
 done
 
 section "helpers, exercised"
-t "tmux can create a session"                        'tmux new -d -s abverify && tmux has -t abverify'
-t "new-project scaffolds a git repo"                 'new-project ab-verify-selftest >/dev/null && d="$WORKSPACE/ab-verify-selftest" && test -d "$d/.git" && test -L "$d/AGENTS.md" && test -f "$d/CLAUDE.md" && test -f "$d/.gitignore"'
-t "new-project made an initial commit"               'test "$(git -C "$WORKSPACE/ab-verify-selftest" rev-list --count HEAD)" -ge 1'
-t "killport kills a listener"                        'setsid python3 -m http.server 18123 --bind 127.0.0.1 >/dev/null 2>&1 & sleep 1; ss -tln "sport = :18123" | grep -q 18123 && killport 18123 >/dev/null 2>&1; sleep 0.5; ! ss -tln "sport = :18123" | grep -q 18123'
+if create_session; then ok "tmux can create a session"; else bad "tmux can create a session"; fi
+t "new-project scaffolds a git repo"                 'new-project project "$verify_tmp" >/dev/null && test -d "$project_dir/.git" && test -L "$project_dir/AGENTS.md" && test -f "$project_dir/CLAUDE.md" && test -f "$project_dir/.gitignore"'
+t "new-project made an initial commit"               'test "$(git -C "$project_dir" rev-list --count HEAD)" -ge 1'
+if check_listener; then ok "killport kills a listener"; else bad "killport kills a listener"; fi
 t "sysinfo runs"                                     'sysinfo | grep -q host'
 t "agent-status runs"                                'agent-status | grep -q agents'
 t "work helper installed"                            'command -v work'
@@ -967,7 +1043,7 @@ t "root shim: claude tells root what to do"          'sudo -n /usr/local/bin/cla
 
 section "tailcat"
 if command -v tailcat >/dev/null 2>&1; then
-  t "tailcat runs"                                   'tailcat version 2>/dev/null | grep -q .'
+  t "tailcat runs"                                   'command_matches . tailcat version'
   t "persistent default key exists"                  'test -s ~/.config/tailcat/keys/default.private.json'
 else skp "tailcat (--no-tailcat)"; fi
 
