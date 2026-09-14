@@ -125,13 +125,14 @@ os.kill(int((root / 'listener.pid').read_text()), signal.SIGTERM)
             self.assertEqual(self.run_helpers('check_alias present').returncode, 0)
             self.assertNotEqual(self.run_helpers('check_alias missing_fixture_alias').returncode, 0)
 
-    def test_pager_lean_default_and_wrong_value(self):
-        self.shell.stub('git',stdout='less\n')
-        self.assertEqual(self.run_helpers('check_pager').returncode,0)
-        self.shell.stub('delta')
-        self.assertNotEqual(self.run_helpers('check_pager').returncode,0)
-        self.shell.stub('git',stdout='delta\n')
-        self.assertEqual(self.run_helpers('check_pager').returncode,0)
+    def test_custom_git_configuration_parses(self):
+        self.shell.allow('git','/usr/bin/git')
+        self.shell.env['GIT_CONFIG_NOSYSTEM']='1'
+        config=self.shell.home/'.gitconfig'
+        config.write_text('[core]\n pager = custom-pager --flag\n[pull]\n rebase = false\n[push]\n autoSetupRemote = false\n')
+        self.assertEqual(self.run_helpers('check_git_configuration').returncode,0)
+        config.write_text('[broken\n')
+        self.assertNotEqual(self.run_helpers('check_git_configuration').returncode,0)
 
     def test_numeric_version_failure_is_failure(self):
         for status in (0,1):

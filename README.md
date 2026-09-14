@@ -19,7 +19,7 @@
 
 One bash script that turns a bare [Steel](https://steel.dev) sandbox VM (or any fresh Debian/Ubuntu box) into a ready-to-work environment for **Claude Code**, **Codex CLI**, **OpenCode** and **pi**.
 
-Run it as root on a new VM. About two minutes later you have a non-root `agent` user, modern CLI tools, sane dotfiles, both agents installed and authenticated, and encrypted remote access via [tailcat](https://github.com/tailscale/tailcat). Re-running is safe: every step is idempotent.
+Run it as root on a new VM. About two minutes later you have a non-root `agent` user, modern CLI tools, sane dotfiles, both agents installed and authenticated, and encrypted remote access via [tailcat](https://github.com/tailscale/tailcat). Reruns refresh system files, helpers and the managed Bash block. Existing user-owned dotfiles and agent instructions—including empty files and symlinks—are preserved. Previously generated files keep their current defaults; they are not automatically migrated. Explicit `GIT_NAME` or `GIT_EMAIL` updates only that identity field in a regular Git config.
 
 ## Quick start
 

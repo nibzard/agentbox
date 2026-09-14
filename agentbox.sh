@@ -55,6 +55,8 @@ COPY_AUTH=1
 WITH_TAILCAT=1
 TAILCAT_VERSION="${TAILCAT_VERSION:-latest}"
 TAILCAT_SSH_KEYS="${TAILCAT_SSH_KEYS:-}"   # e.g. "niko@github" or ~/.ssh/authorized_keys
+GIT_NAME_SET=${GIT_NAME+x}
+GIT_EMAIL_SET=${GIT_EMAIL+x}
 GIT_NAME="${GIT_NAME:-}"
 GIT_EMAIL="${GIT_EMAIL:-}"
 
@@ -80,15 +82,74 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 # Replace (or append) a marker-delimited block in a file. Idempotent.
 # usage: put_block <file> <marker> <<'EOF' ... EOF
-put_block() {
-  local file="$1" marker="$2" tmp
-  tmp="$(mktemp)"; cat > "$tmp"
-  mkdir -p "$(dirname "$file")"; touch "$file"
-  # drop any previous block (markers included), then append the fresh one
-  awk -v m="$marker" '$0=="# >>> " m " >>>"{s=1;next} $0=="# <<< " m " <<<"{s=0;next} !s' "$file" > "$file.new" && mv "$file.new" "$file"
-  { printf '\n# >>> %s >>>\n' "$marker"; cat "$tmp"; printf '# <<< %s <<<\n' "$marker"; } >> "$file"
-  rm -f "$tmp"
+put_block() (
+  set -e
+  local file=$1 marker=$2
+  if [[ -L $file || -L ${file%/*} || ( -e $file && ! -f $file ) ]]; then
+    warn "Preserving unmanaged path $file (managed block not updated)"
+    return 0
+  fi
+  block_tmp=$(mktemp); result_tmp=
+  trap 'rm -f -- "$block_tmp" "$result_tmp"' EXIT
+  cat > "$block_tmp"
+  mkdir -p "${file%/*}"
+  result_tmp=$(mktemp "${file}.tmp.XXXXXXXXXX")
+  if [[ -e $file ]]; then
+    cp -p "$file" "$result_tmp"
+    awk -v m="$marker" '$0=="# >>> " m " >>>"{s=1;next} $0=="# <<< " m " <<<"{s=0;next} !s' "$file" > "$result_tmp"
+  fi
+  { printf '# >>> %s >>>\n' "$marker"; cat "$block_tmp"; printf '# <<< %s <<<\n' "$marker"; } >> "$result_tmp"
+  mv -f -- "$result_tmp" "$file"
+)
+
+# User-owned configuration helpers.
+safe_user_path() {
+  local path=$1 home=$2
+  while [[ $path == "$home" || $path == "$home/"* ]]; do
+    if [[ -L $path ]]; then warn "Preserving symlink $path (including dangling links)"; return 1; fi
+    [[ $path == "$home" ]] && break
+    path=${path%/*}
+  done
 }
+ensure_user_directory() {
+  local directory=$1 owner=$2 home=$3
+  safe_user_path "$directory" "$home" || return 1
+  [[ -d $directory ]] && return 0
+  [[ ! -e $directory ]] || { warn "Preserving non-directory $directory"; return 1; }
+  if [[ $directory != "$home" ]]; then ensure_user_directory "${directory%/*}" "$owner" "$home" || return 1; fi
+  mkdir "$directory" && chown "$owner:$owner" "$directory"
+}
+write_user_default() {
+  local file=$1 owner=$2 home=$3
+  safe_user_path "$file" "$home" || return 0
+  [[ ! -e $file ]] || return 0
+  ensure_user_directory "${file%/*}" "$owner" "$home" || return 0
+  cat > "$file"
+  chown "$owner:$owner" "$file"
+}
+link_user_default() {
+  local target=$1 file=$2 owner=$3 home=$4
+  safe_user_path "$file" "$home" || return 0
+  [[ ! -e $file ]] || return 0
+  ensure_user_directory "${file%/*}" "$owner" "$home" || return 0
+  ln -s "$target" "$file"
+  chown -h "$owner:$owner" "$file"
+}
+apply_git_identity() (
+  set -e
+  local file=$1 home=$2
+  [[ -n ${GIT_NAME_SET:-}${GIT_EMAIL_SET:-} ]] || return 0
+  safe_user_path "$file" "$home" || return 0
+  [[ -f $file ]] || return 0
+  identity_tmp=$(mktemp "${file}.identity.XXXXXXXXXX")
+  trap 'rm -f -- "$identity_tmp"' EXIT
+  cp "$file" "$identity_tmp"
+  if [[ -n ${GIT_NAME_SET:-} ]]; then git config --file "$identity_tmp" user.name "$GIT_NAME"; fi
+  if [[ -n ${GIT_EMAIL_SET:-} ]]; then git config --file "$identity_tmp" user.email "$GIT_EMAIL"; fi
+  # Write requested changes through the existing inode to preserve mode/owner.
+  cat "$identity_tmp" > "$file"
+)
+# End user-owned configuration helpers.
 
 as_agent() { su - "$AGENT_USER" -c "$*"; }
 
@@ -359,6 +420,8 @@ hdr "5/10  Dotfiles (agent user, mirrored to root where sensible)"
 write_dotfiles() {
   local home="$1" owner="$2"
 
+  local bashrc_new=0
+  [[ -e "$home/.bashrc" || -L "$home/.bashrc" ]] || bashrc_new=1
   # ---- .bashrc -------------------------------------------------------------
   put_block "$home/.bashrc" "agentbox" <<'EOF'
 # --- environment --------------------------------------------------------------
@@ -452,7 +515,7 @@ serve() { python3 -m http.server "${1:-8000}" --bind 0.0.0.0; }
 EOF
 
   # ---- .inputrc ------------------------------------------------------------
-  cat > "$home/.inputrc" <<'EOF'
+  write_user_default "$home/.inputrc" "$owner" "$home" <<'EOF'
 $include /etc/inputrc
 set completion-ignore-case on
 set show-all-if-ambiguous on
@@ -466,7 +529,7 @@ set bell-style none
 EOF
 
   # ---- .tmux.conf ----------------------------------------------------------
-  cat > "$home/.tmux.conf" <<'EOF'
+  write_user_default "$home/.tmux.conf" "$owner" "$home" <<'EOF'
 # agentbox tmux: no plugins, works offline, mouse on, sane defaults
 set -g default-terminal "tmux-256color"
 set -ga terminal-overrides ",*256col*:Tc"
@@ -504,10 +567,10 @@ bind A split-window -h -p 35 -c "#{pane_current_path}" \; select-pane -L
 EOF
 
   # ---- .gitconfig ----------------------------------------------------------
-  cat > "$home/.gitconfig" <<EOF
+  write_user_default "$home/.gitconfig" "$owner" "$home" <<EOF
 [user]
-	name = ${GIT_NAME:-Agent}
-	email = ${GIT_EMAIL:-agent@localhost}
+	name = Agent
+	email = agent@localhost
 [init]
 	defaultBranch = main
 [push]
@@ -546,7 +609,7 @@ EOF
 EOF
 
   # ---- .vimrc ----------------------------------------------------------------
-  cat > "$home/.vimrc" <<'EOF'
+  write_user_default "$home/.vimrc" "$owner" "$home" <<'EOF'
 set nocompatible number ruler showcmd wildmenu incsearch hlsearch ignorecase smartcase
 set tabstop=4 shiftwidth=4 expandtab autoindent backspace=indent,eol,start
 set mouse=a clipboard=unnamedplus laststatus=2 hidden nobackup noswapfile
@@ -554,7 +617,8 @@ syntax on
 filetype plugin indent on
 EOF
 
-  chown -R "$owner:$owner" "$home/.bashrc" "$home/.inputrc" "$home/.tmux.conf" "$home/.gitconfig" "$home/.vimrc"
+  if [[ $bashrc_new == 1 && -f "$home/.bashrc" && ! -L "$home/.bashrc" ]]; then chown "$owner:$owner" "$home/.bashrc"; fi
+  apply_git_identity "$home/.gitconfig" "$home"
 }
 
 write_dotfiles "$AGENT_HOME" "$AGENT_USER"
@@ -564,9 +628,11 @@ ok "bash / tmux / git / vim / inputrc for $AGENT_USER and root"
 # =============================================================================
 hdr "6/10  Agent configs: CLAUDE.md, AGENTS.md, settings, Codex config"
 # =============================================================================
-mkdir -p "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.config/opencode" "$AGENT_HOME/.pi/agent" "$AGENT_HOME/.agentbox"
+for directory in .claude .codex .config/opencode .pi/agent .agentbox; do
+  ensure_user_directory "$AGENT_HOME/$directory" "$AGENT_USER" "$AGENT_HOME" || warn "Preserved existing $directory path"
+done
 
-cat > "$AGENT_HOME/.claude/CLAUDE.md" <<EOF
+write_user_default "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_USER" "$AGENT_HOME" <<EOF
 # Global instructions for this agent VM
 
 ## Environment
@@ -597,14 +663,13 @@ $( ((IS_STEEL)) && echo "- Outbound HTTPS goes through Steel's egress proxy; its
 - Before declaring done: run the project's tests/lint, and state plainly what was not verified.
 EOF
 # Codex, OpenCode and pi read a global AGENTS.md; keep one source of truth.
-ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.codex/AGENTS.md"
-ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.config/opencode/AGENTS.md"
-ln -sfn "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.pi/agent/AGENTS.md"
+link_user_default "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.codex/AGENTS.md" "$AGENT_USER" "$AGENT_HOME"
+link_user_default "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.config/opencode/AGENTS.md" "$AGENT_USER" "$AGENT_HOME"
+link_user_default "$AGENT_HOME/.claude/CLAUDE.md" "$AGENT_HOME/.pi/agent/AGENTS.md" "$AGENT_USER" "$AGENT_HOME"
 
 # Claude Code user settings (merge-free: only written if absent so re-runs
 # don't clobber choices the user made from inside Claude).
-if [[ ! -s "$AGENT_HOME/.claude/settings.json" ]]; then
-cat > "$AGENT_HOME/.claude/settings.json" <<'EOF'
+write_user_default "$AGENT_HOME/.claude/settings.json" "$AGENT_USER" "$AGENT_HOME" <<'EOF'
 {
   "theme": "dark",
   "env": {
@@ -626,11 +691,9 @@ cat > "$AGENT_HOME/.claude/settings.json" <<'EOF'
   }
 }
 EOF
-fi
 
 # Codex CLI config
-if [[ ! -s "$AGENT_HOME/.codex/config.toml" ]]; then
-cat > "$AGENT_HOME/.codex/config.toml" <<'EOF'
+write_user_default "$AGENT_HOME/.codex/config.toml" "$AGENT_USER" "$AGENT_HOME" <<'EOF'
 # Codex CLI defaults for the agent VM. `cx-yolo` alias bypasses everything.
 approval_policy = "on-request"
 sandbox_mode = "workspace-write"
@@ -641,11 +704,11 @@ network_access = true
 [history]
 persistence = "save-all"
 EOF
-fi
 
 # Secrets file (sourced by .bashrc). Seed from the provisioning env if present.
 ENVF="$AGENT_HOME/.agentbox/env"
-touch "$ENVF"
+write_user_default "$ENVF" "$AGENT_USER" "$AGENT_HOME" </dev/null
+if safe_user_path "$ENVF" "$AGENT_HOME" && [[ -f $ENVF ]]; then
 for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GH_TOKEN GITHUB_TOKEN; do
   v="${!k:-}"
   if [[ -n "$v" ]] && ! grep -q "^export $k=" "$ENVF"; then
@@ -653,7 +716,7 @@ for k in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY GH_TOKEN GITHU
   fi
 done
 chmod 0600 "$ENVF"
-chown -R "$AGENT_USER:$AGENT_USER" "$AGENT_HOME/.claude" "$AGENT_HOME/.codex" "$AGENT_HOME/.config" "$AGENT_HOME/.pi" "$AGENT_HOME/.agentbox"
+fi
 ok "CLAUDE.md, AGENTS.md symlinks (codex, opencode, pi), settings.json, codex config.toml"
 
 # =============================================================================
@@ -837,9 +900,9 @@ fi
 # Copy root's existing Claude login so the agent user doesn't have to re-auth.
 # NOTE: this puts your OAuth credentials in the agent user's home; anything the
 # agent runs can read them. Fine for a throwaway VM, skip with --no-copy-auth.
-if [[ $COPY_AUTH -eq 1 && -s /root/.claude/.credentials.json && ! -s "$AGENT_HOME/.claude/.credentials.json" ]]; then
+if [[ $COPY_AUTH -eq 1 && -s /root/.claude/.credentials.json && ! -s "$AGENT_HOME/.claude/.credentials.json" ]] && safe_user_path "$AGENT_HOME/.claude/.credentials.json" "$AGENT_HOME"; then
   install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /root/.claude/.credentials.json "$AGENT_HOME/.claude/.credentials.json"
-  if [[ -s /root/.claude.json ]]; then
+  if [[ -s /root/.claude.json ]] && safe_user_path "$AGENT_HOME/.claude.json" "$AGENT_HOME"; then
     # keep oauthAccount + onboarding flags, drop root's per-project state
     if have jq; then
       jq '{oauthAccount, hasCompletedOnboarding, theme, userID} | with_entries(select(.value != null))' /root/.claude.json \
@@ -851,7 +914,7 @@ if [[ $COPY_AUTH -eq 1 && -s /root/.claude/.credentials.json && ! -s "$AGENT_HOM
   fi
   ok "copied root's Claude credentials to $AGENT_USER"
 fi
-if [[ $COPY_AUTH -eq 1 && -s /root/.codex/auth.json && ! -s "$AGENT_HOME/.codex/auth.json" ]]; then
+if [[ $COPY_AUTH -eq 1 && -s /root/.codex/auth.json && ! -s "$AGENT_HOME/.codex/auth.json" ]] && safe_user_path "$AGENT_HOME/.codex/auth.json" "$AGENT_HOME"; then
   install -m 0600 -o "$AGENT_USER" -g "$AGENT_USER" /root/.codex/auth.json "$AGENT_HOME/.codex/auth.json"
   ok "copied root's Codex auth to $AGENT_USER"
 fi
@@ -1167,11 +1230,7 @@ command_matches() {
   printf '%s\n' "$output" | grep -qiE "$pattern"
 }
 check_alias() { bash -ic "type $1" >/dev/null 2>&1; }
-check_pager() {
-  local expected=less
-  command -v delta >/dev/null 2>&1 && expected=delta
-  [ "$(git config --global core.pager)" = "$expected" ]
-}
+check_git_configuration() { test -r "$HOME/.gitconfig" && git config --global --list >/dev/null; }
 # End verifier resource helpers.
 allocate_resources || { bad "cannot allocate verifier temporary directory"; exit 1; }
 
@@ -1220,15 +1279,10 @@ t "pi binary executes"       'command_matches "[0-9]" pi --version'
 [ -s ~/.pi/agent/auth.json ]               && note "pi: signed in"       || note "pi: not signed in (run 'pi' then /login once)"
 
 section "agent configs"
-t "~/.claude/CLAUDE.md exists"                       'test -s ~/.claude/CLAUDE.md'
-t "~/.codex/AGENTS.md symlinks to CLAUDE.md"         'test "$(readlink ~/.codex/AGENTS.md)" = "$HOME/.claude/CLAUDE.md"'
-t "opencode and pi AGENTS.md symlink to CLAUDE.md"   'test "$(readlink ~/.config/opencode/AGENTS.md)" = "$HOME/.claude/CLAUDE.md" && test "$(readlink ~/.pi/agent/AGENTS.md)" = "$HOME/.claude/CLAUDE.md"'
+t "global instructions readable"                  'test -r ~/.claude/CLAUDE.md && test -r ~/.codex/AGENTS.md && test -r ~/.config/opencode/AGENTS.md && test -r ~/.pi/agent/AGENTS.md'
 t "settings.json is valid JSON"                      'jq -e . ~/.claude/settings.json'
-t "settings.json denies .env reads"                  'jq -e "any(.permissions.deny[]?; test(\"\\\\.env\"))" ~/.claude/settings.json'
-t "codex config.toml exists"                         'test -s ~/.codex/config.toml'
-t "git: configured pager"                           'check_pager'
-t "git: pull.rebase true"                            'test "$(git config --global pull.rebase)" = true'
-t "git: push.autoSetupRemote true"                   'test "$(git config --global push.autoSetupRemote)" = true'
+t "codex config.toml readable"                       'test -r ~/.codex/config.toml'
+t "git: configuration parses"                       'check_git_configuration'
 
 section "interactive aliases (fresh bash -i)"
 for a in yolo cc cr tm tl tk gwt cx cx-yolo oc oc-run pi-p; do
