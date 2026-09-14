@@ -29,18 +29,18 @@
 #    • drops opinionated dotfiles: bash, tmux, git, inputrc, global CLAUDE.md
 #      / AGENTS.md, Claude settings, Codex config, agent aliases
 #    • adds helpers: work, agent-status, agentbox-verify, new-project, killport, sysinfo
-#    • optionally copies root's existing Claude login into the agent user
+#    • optionally copies root's Claude and Codex credential files to the agent user
 #
 #  Usage (as root):
 #    bash agentbox.sh                 # default profile
 #    bash agentbox.sh --with-dev      # + build-essential, pip/venv, uv, shellcheck
 #    bash agentbox.sh --lean          # agents + essentials only, skip fancy CLI
-#    bash agentbox.sh --no-copy-auth  # don't copy root's ~/.claude creds to agent
+#    bash agentbox.sh --no-copy-auth  # don't copy root's Claude/Codex credentials
 #    bash agentbox.sh --no-tailcat    # skip tailcat (Tailscale's account-free tunnel/SSH tool)
 #    TAILCAT_SSH_KEYS=you@github bash agentbox.sh   # vm-ssh requires these SSH keys
 #    AGENT_USER=dev bash agentbox.sh  # pick a different username
 #
-#  Re-running is safe; every step is idempotent.
+#  Reruns refresh managed files and preserve existing user-owned configuration.
 #  Inspired by: anthropics/claude-code .devcontainer, nibzard/riftkit,
 #  yulonglin/dotfiles.
 # =============================================================================
@@ -1351,10 +1351,10 @@ t "claude --help parses"     'claude --help >/dev/null 2>&1'
 t "node >=22.19.0 for the agent user (pi needs it)" 'version=$(node -v) && node_version_supported "$version"'
 t "opencode binary executes" 'command_matches "[0-9]" opencode --version'
 t "pi binary executes"       'command_matches "[0-9]" pi --version'
-[ -s ~/.claude/.credentials.json ]         && note "claude: signed in"   || note "claude: not signed in (run 'claude' once)"
-[ -s ~/.codex/auth.json ]                  && note "codex: signed in"    || note "codex: not signed in (run 'codex login' once)"
-[ -s ~/.local/share/opencode/auth.json ]   && note "opencode: signed in" || note "opencode: not signed in (run 'opencode auth login' once)"
-[ -s ~/.pi/agent/auth.json ]               && note "pi: signed in"       || note "pi: not signed in (run 'pi' then /login once)"
+[ -s ~/.claude/.credentials.json ]         && note "claude: auth-file present"   || note "claude: auth-file absent (run 'claude' once)"
+[ -s ~/.codex/auth.json ]                  && note "codex: auth-file present"    || note "codex: auth-file absent (run 'codex login' once)"
+[ -s ~/.local/share/opencode/auth.json ]   && note "opencode: auth-file present" || note "opencode: auth-file absent (run 'opencode auth login' once)"
+[ -s ~/.pi/agent/auth.json ]               && note "pi: auth-file present"       || note "pi: auth-file absent (run 'pi' then /login once)"
 
 section "agent configs"
 t "global instructions readable"                  'test -r ~/.claude/CLAUDE.md && test -r ~/.codex/AGENTS.md && test -r ~/.config/opencode/AGENTS.md && test -r ~/.pi/agent/AGENTS.md'
@@ -1422,5 +1422,5 @@ echo "  Done. Next:"
 echo "    work            # opens tmux as $AGENT_USER in $WORKSPACE"
 echo "    yolo            # inside: claude --dangerously-skip-permissions"
 echo "    agent-status    # verify"
-[[ $COPY_AUTH -eq 1 ]] || echo "  Auth: run 'claude' and 'codex login' once as $AGENT_USER."
+echo "  Sign in as $AGENT_USER when needed: claude; codex login; opencode auth login; pi then /login."
 printf '%s============================================================%s\n' "$c_green" "$c_off"

@@ -17,9 +17,9 @@
 
 # agentbox
 
-One bash script that turns a bare [Steel](https://steel.dev) sandbox VM (or any fresh Debian/Ubuntu box) into a ready-to-work environment for **Claude Code**, **Codex CLI**, **OpenCode** and **pi**.
+One bash script that turns a bare [Steel](https://steel.dev) sandbox VM (or a fresh Debian/Ubuntu box) into a ready-to-work environment for **Claude Code**, **Codex CLI**, **OpenCode** and **pi**.
 
-Run it as root on a new VM. About two minutes later you have a non-root `agent` user, modern CLI tools, sane dotfiles, both agents installed and authenticated, and encrypted remote access via [tailcat](https://github.com/tailscale/tailcat). Reruns refresh system files, helpers and the managed Bash block. Existing user-owned dotfiles and agent instructions—including empty files and symlinks—are preserved. Previously generated files keep their current defaults; they are not automatically migrated. Explicit `GIT_NAME` or `GIT_EMAIL` updates only that identity field in a regular Git config.
+Run it as root on a new VM to create a non-root `agent` user, install all four agents and CLI tools, and configure remote access via [tailcat](https://github.com/tailscale/tailcat). Installation checks executable health; authentication is a separate step. Reruns refresh system files, helpers and the managed Bash block. Existing user-owned dotfiles and agent instructions—including empty files and symlinks—are preserved. Previously generated files keep their current defaults; they are not automatically migrated. Explicit `GIT_NAME` or `GIT_EMAIL` updates only that identity field in a regular Git config.
 
 ## Quick start
 
@@ -56,7 +56,7 @@ tmux runs with the mouse on, so a drag selection copies into tmux and is sent to
 
 ## Why a non-root user
 
-Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel VMs log you in as root. The script creates an `agent` user with passwordless sudo, installs the agents there, and gives root the `work` and `become` shortcuts to drop into it. Root's existing Claude login is copied across so you don't sign in twice.
+Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel VMs log you in as root. The script creates an `agent` user with passwordless sudo, installs the agents there, and gives root the `work` and `become` shortcuts to drop into it. Existing root Claude and Codex credential files are copied when eligible; this does not verify that their sessions are valid.
 
 ## What it does
 
@@ -67,8 +67,8 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | Packages | git, tmux, procps, jq, vim, htop, lsof, openssh-client, rsync, sudo, python3, node, npm, plus ripgrep, fd, bat, eza, fzf, zoxide, git-delta, gh, direnv. btop and neovim on medium/large |
 | User | `agent` with passwordless sudo, owns `/workspace`, shared history in `/commandhistory` |
 | Dotfiles | bash (color prompt, red for root and green for agent, big timestamped history, fzf and zoxide), tmux (mouse, vi keys, no plugins), git (delta, rebase pull, autoSetupRemote, worktree alias), vim, inputrc |
-| Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as the global `AGENTS.md` for Codex, OpenCode and pi. Claude `settings.json` with a read-only allowlist and denies for `.env` and `curl \| sh`. Codex `config.toml` |
-| Agents | Claude Code, Codex CLI and OpenCode via their native installers, pi via npm, all as the agent user. pi needs Node >=22.19.0 and Debian ships 20, so the agent user gets the current Node LTS from the official tarball under `~/.local`, ahead of the system node. Sign-in: `claude`, `codex login`, `opencode auth login`, `pi` then `/login` |
+| Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as the global `AGENTS.md` for Codex, OpenCode and pi. Claude `settings.json` with preapproved shell commands, file-tool Read guards for secret files, and shell-pattern guards for commands such as `curl \| sh`. Codex `config.toml` |
+| Agents | Claude Code, Codex CLI and OpenCode via their native installers, pi via npm, all as the agent user. pi needs Node >=22.19.0. When the existing agent runtime is insufficient, a compatible stable Node LTS is staged from the official tarball under `~/.local`; root retains the distro runtime. Sign-in: `claude`, `codex login`, `opencode auth login`, `pi` then `/login` |
 | tailcat | Installed from the GitHub release `.deb` with checksum verification. Persistent key for a stable address |
 | Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude`, `codex`, `opencode` and `pi` that point at `work` |
 
@@ -82,7 +82,7 @@ Build parallelism and Node heap size are set at every shell start from the curre
 bash agentbox.sh                  # default profile
 bash agentbox.sh --lean           # skip the modern CLI extras
 bash agentbox.sh --with-dev       # + build-essential, pip/venv, uv, shellcheck, strace
-bash agentbox.sh --no-copy-auth   # don't copy root's Claude credentials to the agent user
+bash agentbox.sh --no-copy-auth   # don't copy root's Claude or Codex credentials to the agent user
 bash agentbox.sh --no-tailcat     # skip tailcat
 
 AGENT_USER=dev  WORKSPACE=/src            bash agentbox.sh
@@ -134,7 +134,7 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
 
 - **The clock is set at create time.** The default is one hour, the maximum is eight (`--timeout 28800`). There is no update call, so a box that is running out of time can only be checkpointed and restored with a new timeout.
 - **Use `--auto-pause`.** At the deadline the box pauses instead of stopping, and any command sent to it wakes it. A resume starts a fresh timeout window. `--idle-timeout 1800` pauses it after 30 minutes without traffic, so it costs nothing while you are away.
-- **Setup is cheap, sign-in is not.** The script rebuilds a box in about two minutes, so do not checkpoint a fresh install. Do checkpoint after the agents you use have signed in once (`claude`, `codex login`, `opencode auth login`, `pi` then `/login`):
+- **Preserve useful authenticated state.** Consider checkpointing after the agents you use have signed in once (`claude`, `codex login`, `opencode auth login`, `pi` then `/login`):
 
   ```bash
   steel computer checkpoint --name authed --wait
@@ -152,10 +152,10 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
       "networkSecrets":[{"secretId":"<id>","domain":"api.anthropic.com","header":"x-api-key","template":"{{secret}}"}]}'
   ```
 
-  Header injection is verified. Running Claude Code this way needs a placeholder `ANTHROPIC_API_KEY` so it sends the header at all, bills as API usage, and is not yet tested end to end. The `steel` CLI has no secrets or environments commands, so this is HTTP only for now.
+  Header injection is verified. Running Claude Code this way needs a placeholder `ANTHROPIC_API_KEY` so it sends the header at all, bills as API usage, and is not yet tested end to end. The tested CLI version, `0.5.0-preview.5`, lacks secret/environment commands. Newer CLI documentation includes them; consult your installed `steel --help` and the current CLI docs.
 - **The egress proxy does not intercept every host.** Steel sets per-tool CA variables (`NPM_CONFIG_CAFILE`, `SSL_CERT_FILE`, `PIP_CERT` and more) to a bundle that holds only its egress CA. Hosts the proxy passes through, such as the npm registry, then fail TLS verification in npm, pip and anything else that treats the variable as the whole trust store. The script redirects those variables to the system bundle, which holds the egress CA and the public roots.
 - **ssh and exec live in different mount namespaces.** A fresh namespace has a stale `/proc` with no `/proc/self`, which breaks Bun-based Claude Code and `ss`. The script fixes the namespace it runs in, and every login shell fixes its own on start. `steel computer exec` runs `/bin/sh -c`, which reads no profile, so run agent commands there through a login shell: `steel computer exec -c 'bash -lc "..."'`. One healed session heals all later exec sessions on that box. `agentbox-verify` heals itself.
-- **Delete what you are done with.** Five computers per account. `steel computer quota` shows the count.
+- **Delete what you are done with.** `steel computer quota` shows your current count and limit.
 
 ## Tests
 
@@ -167,26 +167,39 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py' -
 
 The local harness extracts selected generated shell templates from `agentbox.sh` and runs them with temporary homes and stub commands. It does not run the installer or establish live VM compatibility. Run live Steel E2E separately:
 
-`agentbox-verify` on the box is the acceptance suite: about 60 checks that the user, tools, agents, configs and helpers work, exercised rather than just present. `tests/e2e.sh` runs it the honest way: it creates a Steel computer, runs the script twice to prove idempotency, runs `agentbox-verify`, and deletes the box.
+`agentbox-verify` exercises installed tools and helpers. The live runner installs twice, checks runtime versions, TLS and real tmux attach behavior, then runs acceptance. Preservation mode edits synthetic user configuration between runs and checks that it survives. Only newly created computers may use preservation mode. Caller-supplied computers are never deleted; created computers are deleted on success or failure unless `KEEP=1`.
 
 ```bash
 export STEEL_API_KEY=ste-...
-tests/e2e.sh                              # full cycle, about four minutes
-KEEP=1 tests/e2e.sh                       # leave the box running
-COMPUTER_ID=cmp_... tests/e2e.sh          # against a box you already have
-AGENTBOX_ARGS="--lean --no-tailcat" tests/e2e.sh
+bash tests/e2e.sh
+AGENTBOX_ARGS="--lean --no-tailcat" bash tests/e2e.sh
+AGENTBOX_AGENT_USER=dev AGENTBOX_WORKSPACE=/src AGENTBOX_TEST_PRESERVATION=1 bash tests/e2e.sh
+KEEP=1 bash tests/e2e.sh
+COMPUTER_ID=cmp_... bash tests/e2e.sh
 ```
+
+The runner requires the Steel CLI, `jq` and authorized API access. `AGENTBOX_ARGS` accepts whitespace-separated known flags only (`--lean`, `--with-dev`, `--no-copy-auth`, `--no-tailcat`). User/workspace values are forwarded as individual environment arguments, including spaces and quotes.
+
+### Live results
+
+The combined-fix matrix is pending reviewer execution. Local regressions pass; this is not evidence of live VM compatibility.
+
+| Date | Case | Observed OS / architecture | Node and agent versions | Result |
+|---|---|---|---|---|
+| Pending | Default | Not yet observed | Not yet observed | Not run |
+| Pending | Lean, no Tailcat | Not yet observed | Not yet observed | Not run |
+| Pending | Custom user/workspace, preservation | Not yet observed | Not yet observed | Not run |
 
 ## Security notes
 
 - Copying root's OAuth credentials into the agent user means anything the agent runs can read them. Fine for a throwaway VM. Use `--no-copy-auth` for anything longer-lived.
 - `vm-ssh` without `TAILCAT_SSH_KEYS` runs a no-auth SSH server. The printed address is the credential. Set `TAILCAT_SSH_KEYS=you@github` to require your public keys.
 - The global CLAUDE.md tells agents never to paste a tailcat address into a commit, log, or public place.
-- Secrets belong in `~/.agentbox/env` (mode 600, sourced by bash) or a gitignored `.env`. The Claude settings deny reading both.
+- Secrets belong in `~/.agentbox/env` (mode 600, sourced by bash) or a gitignored `.env`. Fresh Claude settings include file-tool Read guards for both; these are not a sandbox preventing shell commands from reading files.
 
 ## Requirements
 
-Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS. `curl` and `ca-certificates` are needed only for the `curl | bash` path; the ssh path installs them. Tested on Steel sandbox VMs (Debian 13) from 1 vCPU / 1 GB to 4 vCPU / 4 GB. Works on x86_64 and arm64.
+Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS. `curl` and `ca-certificates` are needed only for the `curl | bash` path; the ssh path installs them. The current combined-fix live matrix is pending. Debian/Ubuntu and x86_64/arm64 are intended targets; do not infer Ubuntu or arm64 validation from the Steel matrix.
 
 ## Credits
 
