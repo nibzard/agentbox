@@ -115,10 +115,10 @@ if sys.argv[1]=='install':
 
     def test_node_unavailable_and_optional_uv_failure(self):
         source=SOURCE.read_text()
-        node=region(source, "install_required_agent pi '' ''\n",'if [[ $WITH_DEV -eq 1 ]]; then\n  if agent_version uv')
-        result=self.shell.run(self.preamble+self.helpers+'\n'+node+self.final)
+        node=region(source, '# pi needs Node >=22.19.0; keep root and apt on the distro runtime.\n','if [[ $WITH_DEV -eq 1 ]]; then\n  if agent_version uv')
+        result=self.shell.run(self.preamble+self.helpers+'\nensure_node_runtime() { return 1; }\n'+node+self.final)
         self.assertNotEqual(result.returncode,0)
-        self.assertIn('failed: node',result.stdout)
+        self.assertIn('failed: node pi',result.stdout)
         self.assertNotIn('Done.',result.stdout)
         result=self.shell.run(self.preamble+self.helpers+'\nWITH_DEV=1\n'+self.optional+'\n'+self.final,env={'CURL_STATUS':'22','INSTALLER_BODY':'exit 0'})
         self.assertEqual(result.returncode,0,result.stderr)

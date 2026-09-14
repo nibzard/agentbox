@@ -710,30 +710,87 @@ required_installations_ready() {
 install_required_agent claude https://claude.ai/install.sh bash
 install_required_agent codex https://chatgpt.com/codex/install.sh sh
 install_required_agent opencode https://opencode.ai/install bash
-# pi needs Node >= 22.19 and Debian ships 20. Give $AGENT_USER the current Node
-# LTS from the official tarball (checksum verified) under ~/.local, ahead of
-# the system node on PATH. Root and apt keep the distro node.
-NODE_MAJOR=$(as_agent 'node -v 2>/dev/null' | sed -E 's/^v([0-9]+).*/\1/') || NODE_MAJOR=0
-if (( ${NODE_MAJOR:-0} >= 22 )); then
-  ok "node $(as_agent 'node -v') for $AGENT_USER"
-else
-  NODE_ARCH=$(uname -m); case "$NODE_ARCH" in x86_64) NODE_ARCH=x64;; aarch64) NODE_ARCH=arm64;; esac
-  NODE_VER=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version') || NODE_VER=
-  if [[ -n $NODE_VER ]] && as_agent "set -e; t=\$(mktemp -d); cd \"\$t\"
-      curl -fsSL -o node.tar.xz https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$NODE_ARCH.tar.xz
-      curl -fsSL https://nodejs.org/dist/$NODE_VER/SHASUMS256.txt | grep \" node-$NODE_VER-linux-$NODE_ARCH.tar.xz\$\" | sed 's# .*# node.tar.xz#' | sha256sum -c --quiet -
-      mkdir -p ~/.local && tar -xJf node.tar.xz -C ~/.local --strip-components=1 --exclude='*/CHANGELOG.md' --exclude='*/README.md' --exclude='*/LICENSE'
-      cd / && rm -rf \"\$t\"" >/dev/null 2>&1; then
-    ok "node $NODE_VER (LTS) installed for $AGENT_USER in ~/.local"
-  else
-    record_required_failure node
+# User-local Node runtime helpers.
+node_version_supported() {
+  [[ ${1:-} =~ ^v(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$ ]] || return 1
+  (( BASH_REMATCH[1] > 22 || (BASH_REMATCH[1] == 22 && BASH_REMATCH[2] >= 19) ))
+}
+select_node_release() {
+  local index candidates version
+  case "$(uname -m)" in
+    x86_64) NODE_ARCH=x64;;
+    aarch64) NODE_ARCH=arm64;;
+    *) warn "Unsupported architecture for the user-local Node runtime"; return 1;;
+  esac
+  index=$(curl -fsSL https://nodejs.org/dist/index.json) || { warn "Node index download failed"; return 1; }
+  candidates=$(printf '%s' "$index" | jq -er 'if type != "array" then error("expected array") else .[] | select(type == "object") | select((.lts | type) == "string") | select(.lts | length > 0) | .version | select(type == "string") end') || { warn "Invalid Node index or no LTS releases"; return 1; }
+  while IFS= read -r version; do
+    if node_version_supported "$version"; then NODE_VER=$version; return 0; fi
+  done <<< "$candidates"
+  warn "Node index contains no eligible stable LTS (requires >=22.19.0)"
+  return 1
+}
+install_node_runtime() (
+  set -eu
+  umask 077
+  local version=$1 arch=$2 archive checksum actual destination
+  node_temporary=
+  mkdir -p "$HOME/.agentbox" "$HOME/.local/bin" "$HOME/.local/lib/agentbox-node"
+  : > "$HOME/.agentbox/install-node.log"
+  chmod 0600 "$HOME/.agentbox/install-node.log"
+  exec > >(head -c 1048576 > "$HOME/.agentbox/install-node.log"; cat >/dev/null) 2>&1
+  node_log_pid=$!
+  trap 'status=$?; [ -z "$node_temporary" ] || rm -rf -- "$node_temporary"; exec 1>&- 2>&-; wait "$node_log_pid" || true; exit "$status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  node_version_supported "$version"
+  case "$arch" in x64|arm64) ;; *) exit 1;; esac
+  node_temporary=$(mktemp -d "$HOME/.local/lib/agentbox-node/.staging.XXXXXXXXXX")
+  archive="node-$version-linux-$arch.tar.xz"
+  curl -fsSL -o "$node_temporary/$archive" "https://nodejs.org/dist/$version/$archive"
+  curl -fsSL -o "$node_temporary/checksums" "https://nodejs.org/dist/$version/SHASUMS256.txt"
+  checksum=$(awk -v archive="$archive" '$2 == archive { print $1 }' "$node_temporary/checksums")
+  [[ $checksum =~ ^[0-9a-fA-F]{64}$ ]]
+  (cd "$node_temporary"; printf '%s  %s\n' "$checksum" "$archive" | sha256sum -c --quiet -)
+  mkdir "$node_temporary/runtime"
+  tar -xJf "$node_temporary/$archive" -C "$node_temporary/runtime" --strip-components=1
+  actual=$("$node_temporary/runtime/bin/node" -v)
+  node_version_supported "$actual"
+  [[ $actual == "$version" ]]
+  actual=$("$node_temporary/runtime/bin/node" "$node_temporary/runtime/lib/node_modules/npm/bin/npm-cli.js" --version)
+  [[ -n $actual ]]
+  test -f "$node_temporary/runtime/lib/node_modules/npm/bin/npm-cli.js"
+  test -f "$node_temporary/runtime/lib/node_modules/npm/bin/npx-cli.js"
+  # Promote only this validated runtime; npm globals and other local tools stay put.
+  destination="$HOME/.local/lib/agentbox-node/runtime-${node_temporary##*.}"
+  mv "$node_temporary/runtime" "$destination"
+  ln -sfn "$destination/bin/node" "$HOME/.local/bin/node"
+  ln -sfn "$destination/lib/node_modules/npm/bin/npm-cli.js" "$HOME/.local/bin/npm"
+  ln -sfn "$destination/lib/node_modules/npm/bin/npx-cli.js" "$HOME/.local/bin/npx"
+)
+ensure_node_runtime() {
+  local command version
+  if version=$(as_agent 'node -v 2>/dev/null') && node_version_supported "$version"; then
+    ok "node $version for $AGENT_USER"
+    return 0
   fi
-fi
-# pi ships as an npm package. A user-level npm prefix puts its binary in
-# ~/.local/bin and lets the agent install other globals without sudo.
-install_required_agent pi '' ''
-if ! as_agent 'v=$(node --version 2>/dev/null) && test -n "$v"'; then
-  [[ " ${required_failures[*]:-} " == *" node "* ]] || record_required_failure node
+  if ! select_node_release; then return 1; fi
+  printf -v command 'install_node_runtime %q %q' "$NODE_VER" "$NODE_ARCH"
+  if as_agent "$(declare -f node_version_supported install_node_runtime); $command" \
+      && version=$(as_agent 'node -v 2>/dev/null') && node_version_supported "$version"; then
+    ok "node $version (LTS) installed for $AGENT_USER in ~/.local"
+    return 0
+  fi
+  return 1
+}
+# End user-local Node runtime helpers.
+# pi needs Node >=22.19.0; keep root and apt on the distro runtime.
+if ensure_node_runtime; then
+  install_required_agent pi '' ''
+else
+  record_required_failure node
+  record_required_failure pi
+  warn "pi installation skipped because its Node runtime is unavailable"
 fi
 if [[ $WITH_DEV -eq 1 ]]; then
   if agent_version uv >/dev/null 2>&1; then
@@ -974,6 +1031,7 @@ cat > /usr/local/bin/agentbox-verify <<EOF
 # ABOUTME: Run as the agent user (root is redirected). Exits non-zero when any check fails.
 AGENT_USER=$AGENT_USER
 WORKSPACE=$WORKSPACE
+$(declare -f node_version_supported)
 EOF
 cat >> /usr/local/bin/agentbox-verify <<'EOF'
 # A fresh exec session can have a stale /proc (see /etc/profile.d/10-agentbox.sh).
@@ -1103,7 +1161,7 @@ section "agents"
 t "claude binary executes"   'command_matches "claude" claude --version'
 t "codex binary executes"    'command_matches "codex" codex --version'
 t "claude --help parses"     'claude --help >/dev/null 2>&1'
-t "node >= 22 for the agent user (pi needs it)"  'test "$(node -v | sed -E "s/^v([0-9]+).*/\1/")" -ge 22'
+t "node >=22.19.0 for the agent user (pi needs it)" 'version=$(node -v) && node_version_supported "$version"'
 t "opencode binary executes" 'command_matches "[0-9]" opencode --version'
 t "pi binary executes"       'command_matches "[0-9]" pi --version'
 [ -s ~/.claude/.credentials.json ]         && note "claude: signed in"   || note "claude: not signed in (run 'claude' once)"

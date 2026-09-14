@@ -68,7 +68,7 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | User | `agent` with passwordless sudo, owns `/workspace`, shared history in `/commandhistory` |
 | Dotfiles | bash (color prompt, red for root and green for agent, big timestamped history, fzf and zoxide), tmux (mouse, vi keys, no plugins), git (delta, rebase pull, autoSetupRemote, worktree alias), vim, inputrc |
 | Agent config | Global `~/.claude/CLAUDE.md` describing the machine and its limits, symlinked as the global `AGENTS.md` for Codex, OpenCode and pi. Claude `settings.json` with a read-only allowlist and denies for `.env` and `curl \| sh`. Codex `config.toml` |
-| Agents | Claude Code, Codex CLI and OpenCode via their native installers, pi via npm, all as the agent user. pi needs Node 22 and Debian ships 20, so the agent user gets the current Node LTS from the official tarball under `~/.local`, ahead of the system node. Sign-in: `claude`, `codex login`, `opencode auth login`, `pi` then `/login` |
+| Agents | Claude Code, Codex CLI and OpenCode via their native installers, pi via npm, all as the agent user. pi needs Node >=22.19.0 and Debian ships 20, so the agent user gets the current Node LTS from the official tarball under `~/.local`, ahead of the system node. Sign-in: `claude`, `codex login`, `opencode auth login`, `pi` then `/login` |
 | tailcat | Installed from the GitHub release `.deb` with checksum verification. Persistent key for a stable address |
 | Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude`, `codex`, `opencode` and `pi` that point at `work` |
 
