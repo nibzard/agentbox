@@ -628,39 +628,97 @@ ok "CLAUDE.md, AGENTS.md symlinks (codex, opencode, pi), settings.json, codex co
 # =============================================================================
 hdr "7/10  Install Claude Code, Codex, OpenCode, pi for $AGENT_USER"
 # =============================================================================
-if as_agent 'test -x "$HOME/.local/bin/claude"'; then
-  ok "claude already installed: $(as_agent '"$HOME/.local/bin/claude" --version 2>/dev/null | head -1')"
-else
-  as_agent 'curl -fsSL https://claude.ai/install.sh | bash' >/dev/null 2>&1 \
-    && ok "claude installed: $(as_agent '"$HOME/.local/bin/claude" --version 2>/dev/null | head -1')" \
-    || warn "Claude Code install failed (check network)"
-fi
-if as_agent 'test -x "$HOME/.local/bin/codex"'; then
-  ok "codex already installed: $(as_agent '"$HOME/.local/bin/codex" --version 2>/dev/null | head -1')"
-else
-  as_agent 'curl -fsSL https://chatgpt.com/codex/install.sh | sh' >/dev/null 2>&1 \
-    && ok "codex installed: $(as_agent '"$HOME/.local/bin/codex" --version 2>/dev/null | head -1')" \
-    || warn "Codex install failed (check network)"
-fi
-# OpenCode's installer puts the binary in ~/.opencode/bin and edits rc files
-# unless that dir is already on PATH. Keep PATH clean: pre-seed it, then link
-# the binary into ~/.local/bin next to the other agents.
-if as_agent 'test -x "$HOME/.local/bin/opencode"'; then
-  ok "opencode already installed: $(as_agent '"$HOME/.local/bin/opencode" --version 2>/dev/null | head -1')"
-else
-  as_agent 'export PATH="$HOME/.opencode/bin:$PATH"; curl -fsSL https://opencode.ai/install | bash && ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"' >/dev/null 2>&1 \
-    && ok "opencode installed: $(as_agent '"$HOME/.local/bin/opencode" --version 2>/dev/null | head -1')" \
-    || warn "OpenCode install failed (check network)"
-fi
+# Required agent installation helpers.
+required_failures=()
+record_required_failure() { required_failures+=("$1"); warn "$1 unavailable; see ~/.agentbox/install-$1.log and ~/.agentbox/health-$1.log as $AGENT_USER"; }
+agent_health() (
+  set -eu
+  umask 077
+  local name=$1 output status log
+  log="$HOME/.agentbox/health-$name.log"
+  mkdir -p "$HOME/.agentbox"
+  : > "$log"
+  chmod 0600 "$log"
+  if ! test -x "$HOME/.local/bin/$name"; then
+    printf '%s\n' 'Missing executable at the expected user-local path.' >> "$log"
+    exit 1
+  fi
+  if output=$("$HOME/.local/bin/$name" --version 2> >(head -c 1048576 > "$log"; cat >/dev/null)); then
+    if test -n "$output"; then printf '%s\n' "$output"; exit 0; fi
+    printf '%s\n' 'Version command returned empty output.' >> "$log"
+  else
+    status=$?
+    printf 'Version command exited %s. Captured stdout follows:\n' "$status" >> "$log"
+    printf '%s\n' "$output" | head -c 1048576 >> "$log"
+  fi
+  exit 1
+)
+run_agent_installer() (
+  set -eu
+  umask 077
+  local name=$1 url=$2 interpreter=$3
+  temporary=
+  mkdir -p "$HOME/.agentbox" "$HOME/.local/bin"
+  # Bound only the log sink; continue draining so large installers can finish.
+  : > "$HOME/.agentbox/install-$name.log"
+  chmod 0600 "$HOME/.agentbox/install-$name.log"
+  exec > >(head -c 1048576 > "$HOME/.agentbox/install-$name.log"; cat >/dev/null) 2>&1
+  log_pid=$!
+  trap 'status=$?; rm -f -- "$temporary"; exec 1>&- 2>&-; wait "$log_pid" || true; exit "$status"' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  if [ "$name" = pi ]; then
+    npm config set prefix "$HOME/.local"
+    npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+  else
+    temporary=$(mktemp "$HOME/.agentbox/installer.XXXXXXXXXX")
+    curl -fsSL -o "$temporary" "$url"
+    if [ "$name" = opencode ]; then export PATH="$HOME/.opencode/bin:$PATH"; fi
+    "$interpreter" "$temporary"
+    if [ "$name" = opencode ]; then
+      test -x "$HOME/.opencode/bin/opencode"
+      ln -sfn "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"
+    fi
+  fi
+)
+agent_version() {
+  local command
+  printf -v command 'agent_health %q' "$1"
+  as_agent "$(declare -f agent_health); $command"
+}
+install_required_agent() {
+  local name=$1 url=$2 interpreter=$3 version command
+  if version=$(agent_version "$name"); then
+    ok "$name already installed: ${version%%$'\n'*}"
+    return 0
+  fi
+  printf -v command 'run_agent_installer %q %q %q' "$name" "$url" "$interpreter"
+  if as_agent "$(declare -f run_agent_installer); $command" \
+      && version=$(agent_version "$name"); then
+    ok "$name installed: ${version%%$'\n'*}"
+  else
+    record_required_failure "$name"
+  fi
+}
+required_installations_ready() {
+  if (( ${#required_failures[@]} )); then
+    warn "Required installations failed: ${required_failures[*]}. Diagnostic helpers are available; rerun setup after resolving the failures."
+    return 1
+  fi
+}
+# End required agent installation helpers.
+install_required_agent claude https://claude.ai/install.sh bash
+install_required_agent codex https://chatgpt.com/codex/install.sh sh
+install_required_agent opencode https://opencode.ai/install bash
 # pi needs Node >= 22.19 and Debian ships 20. Give $AGENT_USER the current Node
 # LTS from the official tarball (checksum verified) under ~/.local, ahead of
 # the system node on PATH. Root and apt keep the distro node.
-NODE_MAJOR=$(as_agent 'node -v 2>/dev/null' | sed -E 's/^v([0-9]+).*/\1/')
+NODE_MAJOR=$(as_agent 'node -v 2>/dev/null' | sed -E 's/^v([0-9]+).*/\1/') || NODE_MAJOR=0
 if (( ${NODE_MAJOR:-0} >= 22 )); then
   ok "node $(as_agent 'node -v') for $AGENT_USER"
 else
   NODE_ARCH=$(uname -m); case "$NODE_ARCH" in x86_64) NODE_ARCH=x64;; aarch64) NODE_ARCH=arm64;; esac
-  NODE_VER=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version')
+  NODE_VER=$(curl -fsSL https://nodejs.org/dist/index.json | jq -r '[.[] | select(.lts != false)][0].version') || NODE_VER=
   if [[ -n $NODE_VER ]] && as_agent "set -e; t=\$(mktemp -d); cd \"\$t\"
       curl -fsSL -o node.tar.xz https://nodejs.org/dist/$NODE_VER/node-$NODE_VER-linux-$NODE_ARCH.tar.xz
       curl -fsSL https://nodejs.org/dist/$NODE_VER/SHASUMS256.txt | grep \" node-$NODE_VER-linux-$NODE_ARCH.tar.xz\$\" | sed 's# .*# node.tar.xz#' | sha256sum -c --quiet -
@@ -668,21 +726,24 @@ else
       cd / && rm -rf \"\$t\"" >/dev/null 2>&1; then
     ok "node $NODE_VER (LTS) installed for $AGENT_USER in ~/.local"
   else
-    warn "node LTS install for $AGENT_USER failed; pi needs node >= 22"
+    record_required_failure node
   fi
 fi
 # pi ships as an npm package. A user-level npm prefix puts its binary in
 # ~/.local/bin and lets the agent install other globals without sudo.
-if as_agent 'test -x "$HOME/.local/bin/pi"'; then
-  ok "pi already installed: $(as_agent '"$HOME/.local/bin/pi" --version 2>/dev/null | head -1')"
-else
-  as_agent 'npm config set prefix "$HOME/.local" && npm install -g --ignore-scripts @earendil-works/pi-coding-agent' >/dev/null 2>&1 \
-    && ok "pi installed: $(as_agent '"$HOME/.local/bin/pi" --version 2>/dev/null | head -1')" \
-    || warn "pi install failed (check network)"
+install_required_agent pi '' ''
+if ! as_agent 'v=$(node --version 2>/dev/null) && test -n "$v"'; then
+  [[ " ${required_failures[*]:-} " == *" node "* ]] || record_required_failure node
 fi
 if [[ $WITH_DEV -eq 1 ]]; then
-  as_agent 'command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh' >/dev/null 2>&1 \
-    && ok "uv installed" || warn "uv install failed"
+  if agent_version uv >/dev/null 2>&1; then
+    ok "uv already installed"
+  elif as_agent "$(declare -f run_agent_installer); run_agent_installer uv https://astral.sh/uv/install.sh sh" \
+      && agent_version uv >/dev/null 2>&1; then
+    ok "uv installed"
+  else
+    warn "uv install failed; see ~/.agentbox/install-uv.log and ~/.agentbox/health-uv.log as $AGENT_USER"
+  fi
 fi
 
 # Copy root's existing Claude login so the agent user doesn't have to re-auth.
@@ -1115,6 +1176,7 @@ EOF
 ok "/etc/motd (printed by interactive shells outside tmux)"
 
 # =============================================================================
+required_installations_ready || exit 1
 printf '\n%s============================================================%s\n' "$c_green" "$c_off"
 echo "  Done. Next:"
 echo "    work            # opens tmux as $AGENT_USER in $WORKSPACE"
