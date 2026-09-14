@@ -1098,9 +1098,16 @@ else echo "  saved-keys: unavailable"; fi
 # Count processes without exposing their command lines or tunnel addresses.
 count=$(pgrep -xc tailcat 2>/dev/null) || count=0
 echo "  processes: $count"
-b "tmux";    tmux ls 2>/dev/null | sed 's/^/  /' || echo "  (none)"
+b "tmux"
+if sessions=$(tmux ls 2>/dev/null) && [ -n "$sessions" ]; then
+  printf '%s\n' "$sessions" | sed 's/^/  /'
+else echo "  (none)"; fi
 b "listen";  ss -tlnp 2>/dev/null | awk 'NR>1{print "  "$4}' | sort -u
-b "workspace"; ls -1 "$WORKSPACE" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
+b "workspace"
+if entries=$(ls -1 "$WORKSPACE" 2>/dev/null); then
+  if [ -n "$entries" ]; then printf '%s\n' "$entries" | sed 's/^/  /'
+  else echo "  (empty)"; fi
+else echo "  (unavailable)"; fi
 EOF
 
 cat > /usr/local/bin/new-project <<'EOF'

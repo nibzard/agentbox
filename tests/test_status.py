@@ -78,6 +78,24 @@ sys.exit(subprocess.run(['/bin/bash','-c',sys.argv[sys.argv.index('-c')+1]],env=
         self.assertEqual(recorded.stdout, ''.join('<'+a+'>' for a in [str(self.helper)]+args))
         self.assertFalse((self.shell.root/'no-execution').exists())
 
+    def test_session_and_workspace_fallbacks(self):
+        for status in (0, 1):
+            with self.subTest(status=status):
+                self.executable('tmux', f'exit {status}')
+                self.executable('ls', f'exit {status}')
+                result = self.invoke()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('  (none)', result.stdout)
+                workspace = result.stdout.split('workspace', 1)[1]
+                self.assertIn('  (empty)' if status == 0 else '  (unavailable)', workspace)
+        self.executable('tmux', 'echo stale-session; exit 1')
+        self.executable('ls', 'echo partial-listing; exit 1')
+        result = self.invoke()
+        self.assertNotIn('stale-session', result.stdout)
+        self.assertNotIn('partial-listing', result.stdout)
+        self.assertIn('  (none)', result.stdout)
+        self.assertIn('  (unavailable)', result.stdout)
+
     def test_unavailable_commands_and_other_caller(self):
         (self.local/'claude').unlink()
         self.executable('codex', 'echo 9.9.9; exit 1', self.local)
