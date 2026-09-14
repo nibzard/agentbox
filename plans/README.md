@@ -22,23 +22,23 @@ This is one ordered program of fixes, split into independently executable handof
 
 Status values: TODO, IN PROGRESS, DONE, BLOCKED (with reason), REJECTED (with reason). Add concise verification evidence when updating a status. Do not claim DONE solely because the implementation looks correct.
 
-## Recommended sequence
+## Execution sequence
 
-1. **001–002:** Establish the offline test harness, then make the acceptance verifier safe and accurate before it is used on a real box.
-2. **003–005:** Preserve the latest TLS/Node improvements while correcting bootstrap errors, required-agent outcomes and the exact Node minimum.
-3. **006–010:** Fix configured helpers, preserve user files, protect project scaffolding, implement ephemeral sharing and refresh status at runtime.
-4. **011:** Run the combined local suite and live matrix, and reconcile documentation with observed behavior.
+1. **001–002:** Established the offline test harness and made the acceptance verifier safe and accurate before using it on a real box.
+2. **003–005:** Preserved the existing TLS/Node improvements while correcting bootstrap errors, required-agent outcomes and the exact Node minimum.
+3. **006–010:** Fixed configured helpers, preserved user files, protected project scaffolding, implemented ephemeral sharing and refreshed status at runtime.
+4. **011:** Ran the combined local suite and live matrix, and reconciled documentation with observed behavior.
 
-Execute serially: almost every plan edits agentbox.sh. Even where logical dependencies permit parallel work, simultaneous edits to that file add avoidable integration risk. Each plan includes the necessary context and the test-harness contract; no executor needs the review conversation.
+Implementation proceeded serially because almost every plan edited agentbox.sh. Each plan retains the original handoff context and test-harness contract; the status table and execution evidence record the completed work.
 
 ## Dependency notes
 
-- 001 provides tests/support.py and standard-library unittest discovery. Later plan commands refer to tests that their executor must create; they are not present yet.
-- 002 fixes destructive cleanup before live verification and passes scaffold parents explicitly, so later workspace/scaffold changes can remain safe.
-- 004 builds on 003's trust/error behavior. 005 completes the new Node path using 004's required-install failure outcome.
-- 006 establishes configured user/workspace propagation and safe root-to-agent argument handling. 007–010 retain that behavior.
-- 007 updates verifier expectations for legitimate custom dotfiles; 002's fresh-default tests must remain as generation tests.
-- 011 depends on all fixes. Missing live access is recorded explicitly; local checks alone do not satisfy its completion gate.
+- 001 introduced tests/support.py and standard-library unittest discovery. Later plans added their regression tests to this harness.
+- 002 isolated verifier cleanup and passed scaffold parents explicitly before the later workspace/scaffold changes.
+- 004 built on 003's trust/error behavior. 005 completed the Node path using 004's required-install failure outcome.
+- 006 established configured user/workspace propagation and safe root-to-agent argument handling. 007–010 retained that behavior.
+- 007 updated verifier expectations for legitimate custom dotfiles while retaining fresh-default assertions in generation tests.
+- 011 depended on all fixes and required both local and live checks to pass before completion.
 
 ## Review finding coverage
 
@@ -54,32 +54,32 @@ Execute serially: almost every plan edits agentbox.sh. Even where logical depend
 | First pass 8: new-project commits unrelated work | 008 |
 | First pass 9: vm-share --ephemeral unsupported | 009 |
 | First pass 10: baked-in tailcat status | 010 |
-| Second pass 1: unsupported stock Node for pi | Partially fixed upstream; remaining exact-minimum/failure checks in 005 |
+| Second pass 1: unsupported stock Node for pi | Initial runtime added upstream; 005 completed exact-minimum/failure checks |
 | Second pass 2: banner masks missing aliases | 002 |
 | Local feedback loop and honest integration/docs claims | 001, 011 |
 
-## Reconciliation with changes since the reviews
+## Baseline reconciliation before implementation
 
-- **c7539ac already adds user-local Node LTS.** Do not reimplement the original “no compatible Node installed” finding. Current installer/verifier only check major >=22; plan 005 handles >=22.19.0 and lookup/download validation.
-- **c7539ac fixes replacement CA bundles for npm/public endpoints.** Plan 003 preserves combined public+egress roots, NODE_EXTRA_CA_CERTS additive behavior and runtime defaults while handling empty variable lists and safe shell serialization.
-- **5db381b runs agent version queries in the agent login environment.** Plan 010 preserves that fix while avoiding unnecessary su for the agent caller and making tailcat discovery happen at runtime.
-- Login banner and TERM/terminfo changes remain. Plan 002 fixes tests polluted by banner output; plan 006 fixes the independent tmux exec fallback.
+- **c7539ac had already added user-local Node LTS.** At the planning baseline, `338f977`, the installer/verifier checked only major >=22. Plan 005 now enforces >=22.19.0 and validates release lookup and runtime installation.
+- **c7539ac had fixed replacement CA bundles for npm/public endpoints.** Plan 003 retained combined public+egress roots, NODE_EXTRA_CA_CERTS additive behavior and runtime defaults while fixing empty variable lists and shell serialization.
+- **5db381b had moved agent version queries into the agent login environment.** Plan 010 retained the root-side behavior, avoided unnecessary su for the agent caller and moved tailcat discovery to runtime.
+- The login banner and TERM/terminfo changes were retained. Plan 002 corrected tests polluted by banner output; plan 006 fixed the independent tmux exec fallback.
 
 ## Findings considered and rejected or deferred
 
-- Passwordless sudo, copied OAuth files, bypass aliases and address-based SSH are explicit disposable-VM design choices. Do not redesign them during these fixes.
-- Native installer delivery is an intentional dependency mechanism; failure detection is the concrete defect. General package pinning/upgrade policy remains a separate future decision.
+- Passwordless sudo, copied OAuth files, bypass aliases and address-based SSH are explicit disposable-VM design choices retained through these fixes.
+- Native installer delivery was retained and its failure detection was corrected. General package pinning/upgrade policy remains a separate future decision.
 - A full source-module rewrite, plugin architecture, dashboards, provider sign-in automation and release automation are outside this repair scope.
-- Exact static Git/AGENTS.md defaults should be tested at generation time; rejecting a valid user customization in the acceptance verifier conflicts with the preservation fix.
-- The status reporter's same-user su edge is included as a targeted compatibility check in 010; do not undo the recent root-side runtime correction.
+- Fresh Git/AGENTS.md defaults are covered by generation tests; the acceptance verifier allows valid user customization.
+- Plan 010 covered the status reporter's same-user su case while retaining the earlier root-side runtime correction.
 
 ## Verification baseline and execution environment
 
-Verified during planning: `bash -n agentbox.sh && bash -n tests/e2e.sh` and `git diff --check` exit 0. At planning time the repository had no local tests beyond the Steel E2E runner, no build/typecheck command, and no committed CI workflow. ShellCheck was not available on the planning host.
+Verified during planning: `bash -n agentbox.sh && bash -n tests/e2e.sh` and `git diff --check` exited 0. At planning time the repository had no local tests beyond the Steel E2E runner, no build/typecheck command, and no committed CI workflow. ShellCheck was not available on the planning host.
 
-After 001: `python3 -m unittest discover -s tests -p 'test_*.py' -v` is the local gate. Test code must use isolated temporary directories and must never run the complete root installer on the developer machine.
+The local gate introduced by 001 is `python3 -m unittest discover -s tests -p 'test_*.py' -v`. Test code uses isolated temporary directories and must never run the complete root installer on the developer machine.
 
-Existing live command: `bash tests/e2e.sh` requires a configured Steel CLI and STEEL_API_KEY. Plan 011 defines default, lean and custom/preservation cases. Live tests create temporary computers and must retain the runner's owned-resource cleanup contract. No live tests were run to write these plans.
+The live runner, `bash tests/e2e.sh`, requires a configured Steel CLI and STEEL_API_KEY. Plan 011 added and passed the default, lean and custom/preservation cases. Live tests create temporary computers and must retain the runner's owned-resource cleanup contract. No live tests were run during planning; the implementation runs are recorded below.
 
 ## Primary references used in the review
 

@@ -92,6 +92,20 @@ SWAP_MB=0                                 bash agentbox.sh   # or SWAP_MB=4096
 ANTHROPIC_API_KEY=... OPENAI_API_KEY=...  bash agentbox.sh   # seeded into ~/.agentbox/env
 ```
 
+### Saved user and workspace
+
+Setup writes the selected `AGENT_USER` and `WORKSPACE` to `/etc/agentbox.conf`. Login shells export both values. `work`, `agent-status`, `new-project`, `vm-ssh`, `vm-share` and `agentbox-verify` read the file directly, so they use the same selection outside login shells too.
+
+To reuse the saved selection on a rerun, run this as root on the VM, from a directory containing `agentbox.sh`:
+
+```bash
+(
+  . /etc/agentbox.conf && bash agentbox.sh
+)
+```
+
+The file stores only the user and workspace. Pass your setup flags again, such as `--lean --no-tailcat` or `--no-copy-auth`. To change the selection, rerun setup with explicit `AGENT_USER` and `WORKSPACE` values; editing the file alone does not provision an account or move existing work.
+
 ## Shell aliases
 
 | Alias | Command |
@@ -156,6 +170,21 @@ Facts about [Steel computers](https://computers-preview.apidocumentation.com) th
 - **The egress proxy does not intercept every host.** Steel sets per-tool CA variables (`NPM_CONFIG_CAFILE`, `SSL_CERT_FILE`, `PIP_CERT` and more) to a bundle that holds only its egress CA. Hosts the proxy passes through, such as the npm registry, then fail TLS verification in npm, pip and anything else that treats the variable as the whole trust store. The script redirects those variables to the system bundle, which holds the egress CA and the public roots.
 - **ssh and exec live in different mount namespaces.** A fresh namespace has a stale `/proc` with no `/proc/self`, which breaks Bun-based Claude Code and `ss`. The script fixes the namespace it runs in, and every login shell fixes its own on start. `steel computer exec` runs `/bin/sh -c`, which reads no profile, so run agent commands there through a login shell: `steel computer exec -c 'bash -lc "..."'`. One healed session heals all later exec sessions on that box. `agentbox-verify` heals itself.
 - **Delete what you are done with.** `steel computer quota` shows your current count and limit.
+
+## Troubleshooting setup
+
+Setup returns nonzero if a required installation fails or an agent still cannot produce a successful, nonempty version result afterward. The failure summary names the affected components. Once the helpers are available, use `agent-status` for a summary and `agentbox-verify` for acceptance checks that return nonzero on failure. Auth-file presence does not confirm a valid provider session.
+
+Read diagnostics as the configured agent user (`work` switches to that user). Replace `opencode` below with `claude`, `codex` or `pi` as appropriate:
+
+```bash
+less ~/.agentbox/install-opencode.log
+less ~/.agentbox/health-opencode.log
+```
+
+`install-<name>.log` contains installer output; `health-<name>.log` records version-check errors. These files have mode `0600`, and later attempts at the same stage replace its log. A Node release lookup failure appears in setup output; download and runtime-validation diagnostics go to `~/.agentbox/install-node.log` when that stage starts. Logs for skipped stages may not exist.
+
+Resolve the reported cause, then rerun setup as root with the same user, workspace and flags using the guidance above. Working agents are reused; missing or unhealthy agents are installed again. A rerun does not force an upgrade of a working agent.
 
 ## Tests
 
