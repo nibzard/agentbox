@@ -182,13 +182,19 @@ The runner requires the Steel CLI, `jq` and authorized API access. `AGENTBOX_ARG
 
 ### Live results
 
-The combined-fix matrix is pending reviewer execution. Local regressions pass; this is not evidence of live VM compatibility.
+Validated on 2026-09-14 at commit `16222c7` using Steel CLI `0.5.0-preview.5`. All 74 local regression tests, both Bash syntax checks and whitespace checks passed. Each fresh VM completed two installs, actual agent/version and TLS checks, and PTY session creation and repeated attachment from both root and the configured user.
 
-| Date | Case | Observed OS / architecture | Node and agent versions | Result |
+All three cases ran Debian GNU/Linux 13 (trixie), x86_64, with 2 vCPU and 1995 MB RAM. Root retained Node v20.19.2 at `/usr/bin/node`; the agent used Node v24.21.0 under `~/.local/bin`. Installed versions were Claude Code 2.1.270, codex-cli 0.154.0, OpenCode 1.18.30 and pi 0.85.1. Default/custom cases also installed Tailcat v0.6.0; lean omitted it.
+
+| Case | Acceptance passed | Failed | Skipped | Runner exit |
 |---|---|---|---|---|
-| Pending | Default | Not yet observed | Not yet observed | Not run |
-| Pending | Lean, no Tailcat | Not yet observed | Not yet observed | Not run |
-| Pending | Custom user/workspace, preservation | Not yet observed | Not yet observed | Not run |
+| Default | 69 | 0 | 0 | 0 |
+| Lean, no Tailcat | 56 | 0 | 12 expected | 0 |
+| `dev`, `/src`, preservation | 69 | 0 | 0 | 0 |
+
+Lean skips were rg, fd, bat, eza, fzf, zoxide, delta, gh, direnv, nvim, btop and Tailcat. The custom case preserved root and agent Git identities/pager, dotfile checksums, agent instructions and unmanaged Bash sentinels. All acceptance results completed without timeout or truncation. All three owned VMs were deleted successfully; the pre-existing paused computer remained unchanged.
+
+Ubuntu, Debian 12, arm64, other VM sizes and `--with-dev` were not exercised in this matrix.
 
 ## Security notes
 
@@ -199,7 +205,7 @@ The combined-fix matrix is pending reviewer execution. Local regressions pass; t
 
 ## Requirements
 
-Debian 12/13 or Ubuntu 22.04+, root, outbound HTTPS. `curl` and `ca-certificates` are needed only for the `curl | bash` path; the ssh path installs them. The current combined-fix live matrix is pending. Debian/Ubuntu and x86_64/arm64 are intended targets; do not infer Ubuntu or arm64 validation from the Steel matrix.
+Root access and outbound HTTPS are required. The validated target is Debian 13 on x86_64 with the VM size recorded above. Debian 12, Ubuntu 22.04+ and arm64 remain untested targets for this matrix. `curl` and `ca-certificates` are needed only for the `curl | bash` path; the ssh path installs them.
 
 ## Credits
 
