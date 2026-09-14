@@ -1068,9 +1068,37 @@ cat > /usr/local/bin/new-project <<'EOF'
 set -e
 . /etc/agentbox.conf || exit 1
 export AGENT_USER WORKSPACE
-name="${1:?usage: new-project <name> [parent-dir]}"; parent="${2:-$WORKSPACE}"
-d="$parent/$name"; mkdir -p "$d"; cd "$d"
-[ -d .git ] || git init -q
+reject() { echo "new-project: $*" >&2; exit 1; }
+[[ $# -ge 1 && $# -le 2 ]] || reject "usage: new-project <name> [parent-dir]"
+name=$1; parent=${2-$WORKSPACE}
+case "$name" in ''|.|..|-*|*/*) reject "name must be one nonempty directory name, without traversal or a leading dash";; esac
+[[ ! $name =~ [[:cntrl:]] && -n $parent && ! $parent =~ [[:cntrl:]] ]] || reject "invalid name or parent path"
+for variable in GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT; do
+  if declare -p "$variable" >/dev/null 2>&1; then reject "unset $variable before scaffolding"; fi
+done
+command -v git >/dev/null || reject "git is required"
+parent=$(realpath -m -- "$parent") || reject "cannot resolve parent directory"
+d="$parent/$name"
+[[ ! -L $d ]] || reject "target is a symlink: $d"
+if [[ -e $d ]]; then
+  [[ -d $d ]] || reject "target exists and is not a directory: $d"
+  shopt -s nullglob dotglob
+  entries=("$d"/*)
+  (( ${#entries[@]} == 0 )) || reject "target is not empty: $d"
+fi
+probe=$parent
+while [[ ! -e $probe && ! -L $probe ]]; do probe=${probe%/*}; [[ -n $probe ]] || probe=/; done
+[[ -d $probe ]] || reject "parent ancestor is not a directory: $probe"
+ancestor=$probe
+while :; do
+  [[ ! -e "$ancestor/.git" && ! -L "$ancestor/.git" ]] || reject "destination is inside an existing repository"
+  [[ $ancestor == / ]] && break
+  ancestor=${ancestor%/*}; [[ -n $ancestor ]] || ancestor=/
+done
+if git -C "$probe" rev-parse --git-dir >/dev/null 2>&1; then reject "destination is inside an existing repository"; fi
+mkdir -p -- "$d"
+cd -- "$d"
+git init -q
 [ -f CLAUDE.md ] || cat > CLAUDE.md <<MD
 # $name
 
@@ -1089,7 +1117,9 @@ MD
 [ -e AGENTS.md ] || ln -s CLAUDE.md AGENTS.md
 [ -f .gitignore ] || printf '.env\n.env.*\nnode_modules/\n__pycache__/\n.venv/\n.tmp/\n' > .gitignore
 mkdir -p .tmp
-git add -A && git commit -qm "chore: scaffold $name" || true
+if ! git add -- CLAUDE.md AGENTS.md .gitignore || ! git commit -qm "chore: scaffold $name"; then
+  reject "initial commit failed; scaffold files remain in $d for inspection"
+fi
 echo "created $d"
 EOF
 

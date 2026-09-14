@@ -72,6 +72,8 @@ Claude Code refuses `--dangerously-skip-permissions` when run as root, and Steel
 | tailcat | Installed from the GitHub release `.deb` with checksum verification. Persistent key for a stable address |
 | Helpers | `work`, `agent-status`, `agentbox-verify`, `new-project`, `killport`, `sysinfo`, `vm-ssh`, `vm-share`, and root shims for `claude`, `codex`, `opencode` and `pi` that point at `work` |
 
+`new-project NAME [PARENT]` creates a repository in the configured workspace or optional parent directory. It accepts a new or empty target outside existing repositories, and rejects symlink targets, existing contents, traversal names and Git repository-location environment overrides. Only the three scaffold files are committed. If the initial commit fails, the files remain for inspection and the command returns nonzero.
+
 Build parallelism and Node heap size are set at every shell start from the current `nproc` and RAM, so a resized VM picks them up on the next login.
 
 ## Flags and environment
