@@ -92,7 +92,35 @@ put_block() {
 
 as_agent() { su - "$AGENT_USER" -c "$*"; }
 
+# Configured identity helpers.
+validate_agentbox_configuration() {
+  local entry account password uid gid gecos home shell canonical
+  [[ $AGENT_USER =~ ^[a-z_][a-z0-9_-]{0,31}$ && $AGENT_USER != root ]] || { warn "Invalid non-root AGENT_USER"; return 1; }
+  [[ $WORKSPACE == /* && ! $WORKSPACE =~ [[:cntrl:]] ]] || { warn "WORKSPACE must be an absolute path without control characters"; return 1; }
+  canonical=$(realpath -m -- "$WORKSPACE") || return 1
+  [[ $canonical != / ]] || { warn "WORKSPACE must not resolve to /"; return 1; }
+  if entry=$(getent passwd "$AGENT_USER"); then
+    IFS=: read -r account password uid gid gecos home shell <<< "$entry"
+    [[ $uid =~ ^[0-9]+$ && $uid != 0 && $home == /* && $home != / && ! $home =~ [[:cntrl:]] ]] || { warn "Unsupported existing account identity/home for $AGENT_USER"; return 1; }
+    [[ $shell == /bin/bash || $shell == /usr/bin/bash ]] || { warn "Existing $AGENT_USER account must use Bash; its shell was not changed"; return 1; }
+    [[ $(id -gn "$AGENT_USER") == "$AGENT_USER" ]] || { warn "Existing $AGENT_USER account must have a matching primary group; its group was not changed"; return 1; }
+  fi
+}
+persist_agentbox_configuration() {
+  local destination=$1 temporary
+  temporary=$(mktemp "${destination}.tmp.XXXXXXXXXX") || return 1
+  if { ca_export AGENT_USER "$AGENT_USER" && ca_export WORKSPACE "$WORKSPACE"; } > "$temporary" \
+      && sh -n "$temporary" && chmod 0644 "$temporary" && mv -f -- "$temporary" "$destination"; then
+    return 0
+  else
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+# End configured identity helpers.
+
 [[ $EUID -eq 0 ]] || die "run as root"
+validate_agentbox_configuration || die "unsupported agentbox configuration"
 export DEBIAN_FRONTEND=noninteractive
 
 printf '%s' "$c_blue"; cat <<'LOGO'
@@ -283,6 +311,7 @@ else
   ok "user $AGENT_USER exists"
 fi
 AGENT_HOME="$(getent passwd "$AGENT_USER" | cut -d: -f6)"
+persist_agentbox_configuration /etc/agentbox.conf
 echo "$AGENT_USER ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/90-$AGENT_USER"
 chmod 0440 "/etc/sudoers.d/90-$AGENT_USER"
 mkdir -p "$WORKSPACE" "$AGENT_HOME/projects"
@@ -297,6 +326,8 @@ hdr "4/10  System-wide shell defaults (/etc/profile.d)"
 # =============================================================================
 cat > /etc/profile.d/10-agentbox.sh <<'EOF'
 # agentbox: shared defaults for every login shell (root and agent user)
+. /etc/agentbox.conf || return 1
+export AGENT_USER WORKSPACE
 # Steel runs ssh and exec sessions in separate mount namespaces, and a fresh
 # one has a stale /proc (no /proc/self). Bun (Claude Code) and ss need it.
 # Mount it once per namespace; the agent user has passwordless sudo for this.
@@ -370,7 +401,7 @@ else
 fi
 command -v bat >/dev/null && alias cat='bat --paging=never --style=plain'
 alias ..='cd ..'; alias ...='cd ../..'
-alias w='cd /workspace'; alias p='cd ~/projects'
+alias w='cd -- "$WORKSPACE"'; alias p='cd ~/projects'
 mkcd() { mkdir -p "$1" && cd "$1"; }
 
 # --- aliases: git -------------------------------------------------------------
@@ -405,8 +436,8 @@ alias cx-auto='codex --full-auto'
 alias oc='opencode'
 alias oc-run='opencode run'     # headless: oc-run "prompt"
 alias pi-p='pi -p'              # headless: pi-p "prompt"
-if [ "$EUID" -eq 0 ] && id agent >/dev/null 2>&1; then
-  alias become='cd / && exec su - agent'    # root -> agent user
+if [ "$EUID" -eq 0 ] && id "$AGENT_USER" >/dev/null 2>&1; then
+  alias become='cd / && exec su - "$AGENT_USER"'    # root -> agent user
 fi
 
 # --- aliases: system ----------------------------------------------------------
@@ -891,7 +922,12 @@ cat > /usr/local/bin/vm-ssh <<'EOF'
 #   where the printed address IS the credential: share it privately only.
 # Connect from anywhere:  tailcat ssh <address>
 set -e
-[ "$(id -u)" -eq 0 ] && exec su - agent -c "vm-ssh $*"
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
+if [ "$(id -u)" -eq 0 ]; then
+  printf -v command '%q ' vm-ssh "$@"
+  exec su - "$AGENT_USER" -c "$command"
+fi
 key=(); [ "${1:-}" = "--ephemeral" ] && { key=(--key=new); shift; }
 if [ -n "${TAILCAT_SSH_KEYS:-}" ]; then
   exec tailcat serve "${key[@]}" --ssh-authorized-keys="$TAILCAT_SSH_KEYS" ssh "$@"
@@ -907,22 +943,31 @@ cat > /usr/local/bin/vm-share <<'EOF'
 # On your laptop:  tailcat forward <address> 18080:8080   (then open localhost:18080)
 #             or:  tailcat browse <address>               (single web port)
 set -e
-[ "$(id -u)" -eq 0 ] && exec su - agent -c "vm-share $*"
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
+if [ "$(id -u)" -eq 0 ]; then
+  printf -v command '%q ' vm-share "$@"
+  exec su - "$AGENT_USER" -c "$command"
+fi
 [ -n "${1:-}" ] || { echo "usage: vm-share 3000,8080 | all"; exit 2; }
 exec tailcat serve "$@"
 EOF
 chmod 0755 /usr/local/bin/vm-ssh /usr/local/bin/vm-share
 ok "vm-ssh, vm-share"
 
-cat > /usr/local/bin/work <<EOF
+cat > /usr/local/bin/work <<'EOF'
 #!/usr/bin/env bash
-# work [session] — attach-or-create a tmux session in $WORKSPACE (as $AGENT_USER)
-s="\${1:-work}"
-# tmux exits with "missing or unsuitable terminal" when the box has no terminfo for \$TERM.
-infocmp "\${TERM:-dumb}" >/dev/null 2>&1 || export TERM=xterm-256color
-if [ "\$(id -u)" -eq 0 ]; then exec su - $AGENT_USER -c "cd $WORKSPACE && (tmux attach -t \$s 2>/dev/null || tmux new -s \$s)"; fi
-cd $WORKSPACE 2>/dev/null || cd ~
-exec tmux attach -t "\$s" 2>/dev/null || exec tmux new -s "\$s"
+# work [session] — attach or create a tmux session in the configured workspace.
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
+if [ "$(id -u)" -eq 0 ]; then
+  printf -v command '%q ' work "$@"
+  exec su - "$AGENT_USER" -c "$command"
+fi
+s="${1:-work}"
+infocmp "${TERM:-dumb}" >/dev/null 2>&1 || export TERM=xterm-256color
+cd -- "$WORKSPACE" 2>/dev/null || { echo "Cannot access configured workspace: $WORKSPACE" >&2; exit 1; }
+exec tmux new-session -A -s "$s" -c "$WORKSPACE"
 EOF
 
 cat > /usr/local/bin/agent-status <<EOF
@@ -958,7 +1003,9 @@ cat > /usr/local/bin/new-project <<'EOF'
 #!/usr/bin/env bash
 # new-project <name> [dir] — git repo with CLAUDE.md + AGENTS.md scaffold
 set -e
-name="${1:?usage: new-project <name> [parent-dir]}"; parent="${2:-${WORKSPACE:-/workspace}}"
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
+name="${1:?usage: new-project <name> [parent-dir]}"; parent="${2:-$WORKSPACE}"
 d="$parent/$name"; mkdir -p "$d"; cd "$d"
 [ -d .git ] || git init -q
 [ -f CLAUDE.md ] || cat > CLAUDE.md <<MD
@@ -1029,14 +1076,17 @@ cat > /usr/local/bin/agentbox-verify <<EOF
 #!/usr/bin/env bash
 # ABOUTME: Acceptance checks for a box set up by agentbox.sh: system, user, tools, agents, configs, helpers.
 # ABOUTME: Run as the agent user (root is redirected). Exits non-zero when any check fails.
-AGENT_USER=$AGENT_USER
-WORKSPACE=$WORKSPACE
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
 $(declare -f node_version_supported)
 EOF
 cat >> /usr/local/bin/agentbox-verify <<'EOF'
 # A fresh exec session can have a stale /proc (see /etc/profile.d/10-agentbox.sh).
 [ -e /proc/self/mounts ] || mount -t proc proc /proc 2>/dev/null || sudo -n mount -t proc proc /proc 2>/dev/null
-[ "$(id -u)" -eq 0 ] && exec su - "$AGENT_USER" -c "agentbox-verify $*"
+if [ "$(id -u)" -eq 0 ]; then
+  printf -v command '%q ' agentbox-verify "$@"
+  exec su - "$AGENT_USER" -c "$command"
+fi
 pass=0; fail=0; skip=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }

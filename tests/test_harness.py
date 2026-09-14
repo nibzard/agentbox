@@ -13,6 +13,8 @@ class HarnessTests(unittest.TestCase):
         self.source = SOURCE.read_text()
         self.shell = ShellFixture()
         self.addCleanup(self.shell.close)
+        self.config=self.shell.root/"agentbox.conf"
+        self.config.write_text("AGENT_USER=fixtureuser\nWORKSPACE="+str(self.shell.root)+"\n")
 
     def test_unique_and_invalid_anchors(self):
         self.assertEqual(region('start\nbody\nend', 'start\n', '\nend'), 'body')
@@ -29,7 +31,7 @@ class HarnessTests(unittest.TestCase):
     def test_quoted_vm_share_and_stub_behavior(self):
         fragment = heredoc(self.source, "cat > /usr/local/bin/vm-share <<'EOF'")
         self.assertTrue(fragment.quoted)
-        script = self.shell.render(fragment)
+        script = self.shell.render(fragment).replace("/etc/agentbox.conf", str(self.config))
         self.assertEqual(self.shell.run(script, syntax=True).returncode, 0)
         self.shell.stub('id', stdout='1000\n')
         for status, output in [(0, 'first\n'), (17, 'second\n')]:
@@ -40,10 +42,10 @@ class HarnessTests(unittest.TestCase):
             self.assertEqual(self.shell.calls()[-1]['argv'], ['serve', '3000'])
         self.assertEqual(self.shell.run(script).returncode, 2)
 
-    def test_interpolated_work(self):
-        fragment = heredoc(self.source, 'cat > /usr/local/bin/work <<EOF')
-        self.assertFalse(fragment.quoted)
-        script = self.shell.render(fragment, env={'AGENT_USER': 'fixtureuser', 'WORKSPACE': str(self.shell.root)})
+    def test_quoted_work_loads_config(self):
+        fragment = heredoc(self.source, "cat > /usr/local/bin/work <<'EOF'")
+        self.assertTrue(fragment.quoted)
+        script = self.shell.render(fragment).replace("/etc/agentbox.conf", str(self.config))
         self.assertEqual(self.shell.run(script, syntax=True).returncode, 0)
         self.shell.stub('infocmp')
         self.shell.stub('id', stdout='0\n')
@@ -52,7 +54,7 @@ class HarnessTests(unittest.TestCase):
         call = self.shell.calls()[-1]
         self.assertEqual(call['command'], 'su')
         self.assertEqual(call['argv'][:3], ['-', 'fixtureuser', '-c'])
-        self.assertIn('cd ' + str(self.shell.root), call['argv'][3])
+        self.assertTrue(call['argv'][3].startswith('work '))
         self.assertIn('session', call['argv'][3])
 
     def test_concatenated_verifier_syntax_only(self):
@@ -60,7 +62,7 @@ class HarnessTests(unittest.TestCase):
                      heredoc(self.source, "cat >> /usr/local/bin/agentbox-verify <<'EOF'")]
         script = self.shell.render_many(fragments, env={'AGENT_USER': 'fixtureuser', 'WORKSPACE': str(self.shell.root)})
         self.assertEqual(self.shell.run(script, syntax=True).returncode, 0)
-        self.assertIn('AGENT_USER=fixtureuser', script)
+        self.assertIn('export AGENT_USER WORKSPACE', script)
         self.assertTrue(script.endswith(fragments[1].body))
         self.assertEqual(self.shell.calls(), [])
 

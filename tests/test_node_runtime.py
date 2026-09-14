@@ -119,7 +119,9 @@ sys.exit(0 if len(line)==2 and hashlib.sha256(Path(line[1]).read_bytes()).hexdig
 
     def test_verifier_embeds_same_predicate(self):
         fragment=heredoc(self.source,'cat > /usr/local/bin/agentbox-verify <<EOF')
-        result=self.shell.run(self.predicate+'\nWORKSPACE=/fixture\nAGENT_USER=fixture\n/bin/cat <<END\n'+fragment.body+'END\n')
+        config=self.shell.root/'agentbox.conf'
+        config.write_text('AGENT_USER=fixture\nWORKSPACE=/fixture\n')
+        result=self.shell.run(self.predicate+'\n/bin/cat <<END\n'+fragment.body.replace('/etc/agentbox.conf',str(config))+'END\n')
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertEqual(self.shell.run(result.stdout+'\nnode_version_supported v22.18.9').returncode,1)
         self.assertEqual(self.shell.run(result.stdout+'\nnode_version_supported v22.19.0').returncode,0)
