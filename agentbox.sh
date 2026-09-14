@@ -1050,33 +1050,57 @@ cd -- "$WORKSPACE" 2>/dev/null || { echo "Cannot access configured workspace: $W
 exec tmux new-session -A -s "$s" -c "$WORKSPACE"
 EOF
 
-cat > /usr/local/bin/agent-status <<EOF
+cat > /usr/local/bin/agent-status <<'EOF'
 #!/usr/bin/env bash
-# agent-status — one-screen view of the box and the agents
-b() { printf '\e[1;34m%s\e[0m\n' "\$*"; }
-b "host";    echo "  \$(hostname)  \$(. /etc/os-release; echo \$PRETTY_NAME)  \$(uname -r)"
-b "load";    echo "  cpu=\$(nproc) load=\$(cut -d' ' -f1-3 /proc/loadavg) mem=\$(free -m | awk '/Mem/{print \$3"/"\$2" MB"}') disk=\$(df -h / | awk 'NR==2{print \$3"/"\$2}')"
-b "agents";
-# one line per agent for the agent user: version and whether an auth file exists.
-# Versions run as $AGENT_USER so pi finds the agent's Node LTS, not root's node.
-h=\$(getent passwd $AGENT_USER | cut -d: -f6)
+# agent-status — informational local state, never an authentication check.
+. /etc/agentbox.conf || exit 1
+export AGENT_USER WORKSPACE
+if [ "$(id -u)" -eq 0 ]; then
+  printf -v command '%q ' /usr/local/bin/agent-status "$@"
+  exec su - "$AGENT_USER" -c "$command"
+fi
+if [ "$(id -un)" != "$AGENT_USER" ]; then
+  echo "agent-status: unavailable for this caller (configured user: $AGENT_USER)"
+  exit 0
+fi
+IFS=: read -r _ _ _ _ _ h _ < <(getent passwd "$AGENT_USER")
+[ -n "$h" ] || { echo "agent-status: agent home unavailable"; exit 1; }
+export PATH="$h/.local/bin:$PATH"
+b() { printf '\e[1;34m%s\e[0m\n' "$*"; }
+version() {
+  local output
+  if output=$("$@" 2>/dev/null) && [ -n "$output" ]; then
+    printf '%s' "${output%%$'\n'*}"
+  else
+    printf '(unavailable)'
+  fi
+}
+b "host";    echo "  $(hostname)  $(. /etc/os-release; echo $PRETTY_NAME)  $(uname -r)"
+b "load";    echo "  cpu=$(nproc) load=$(cut -d' ' -f1-3 /proc/loadavg) mem=$(free -m | awk '/Mem/{print $3"/"$2" MB"}') disk=$(df -h / | awk 'NR==2{print $3"/"$2}')"
+b "agents"
 while read -r name authf; do
-  v=\$(su - $AGENT_USER -c "\$name --version 2>/dev/null" | head -1); [ -n "\$v" ] || v="(not installed)"
-  [ -s "\$h/\$authf" ] && a="auth✔" || a="no-auth"
-  printf '  %-9s %-34s %s\n' "\$name" "\$v" "\$a"
+  v=$(version "$h/.local/bin/$name" --version)
+  [ -s "$h/$authf" ] && a="auth-file present" || a="auth-file absent"
+  printf '  %-9s %-34s %s\n' "$name" "$v" "$a"
 done <<AGENTS
 claude .claude/.credentials.json
 codex .codex/auth.json
 opencode .local/share/opencode/auth.json
 pi .pi/agent/auth.json
 AGENTS
-b "tailcat"; if command -v tailcat >/dev/null; then
-  echo "  $(tailcat version 2>/dev/null | head -1)  saved-keys: $(su - $AGENT_USER -c 'tailcat genkey --list 2>/dev/null' | tr '\n' ' ')"
-  pgrep -af 'tailcat serve' | sed 's/^/  running: /' || true
-else echo "  (not installed)"; fi
+b "tailcat"
+echo "  $(version tailcat version)"
+if keys=$(tailcat genkey --list 2>/dev/null); then
+  count=0
+  while IFS= read -r key; do [ -z "$key" ] || count=$((count + 1)); done <<< "$keys"
+  echo "  saved-keys: $count"
+else echo "  saved-keys: unavailable"; fi
+# Count processes without exposing their command lines or tunnel addresses.
+count=$(pgrep -xc tailcat 2>/dev/null) || count=0
+echo "  processes: $count"
 b "tmux";    tmux ls 2>/dev/null | sed 's/^/  /' || echo "  (none)"
-b "listen";  ss -tlnp 2>/dev/null | awk 'NR>1{print "  "\$4}' | sort -u
-b "workspace"; ls -1 $WORKSPACE 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
+b "listen";  ss -tlnp 2>/dev/null | awk 'NR>1{print "  "$4}' | sort -u
+b "workspace"; ls -1 "$WORKSPACE" 2>/dev/null | sed 's/^/  /' || echo "  (empty)"
 EOF
 
 cat > /usr/local/bin/new-project <<'EOF'
