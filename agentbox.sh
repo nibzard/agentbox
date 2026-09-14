@@ -1002,7 +1002,7 @@ EOF
 
 cat > /usr/local/bin/vm-share <<'EOF'
 #!/usr/bin/env bash
-# vm-share <port>[,<port>...] | all   — expose local TCP ports over tailcat.
+# vm-share [--ephemeral] <port>[,<port>...] | all — expose local TCP ports over tailcat.
 # On your laptop:  tailcat forward <address> 18080:8080   (then open localhost:18080)
 #             or:  tailcat browse <address>               (single web port)
 set -e
@@ -1012,8 +1012,25 @@ if [ "$(id -u)" -eq 0 ]; then
   printf -v command '%q ' vm-share "$@"
   exec su - "$AGENT_USER" -c "$command"
 fi
-[ -n "${1:-}" ] || { echo "usage: vm-share 3000,8080 | all"; exit 2; }
-exec tailcat serve "$@"
+key=(); ephemeral=0
+if [ "${1:-}" = --ephemeral ]; then key=(--key=new); ephemeral=1; shift; fi
+operand=0; key_value=0
+for argument in "$@"; do
+  case "$argument" in
+    --) break;;  # Remaining arguments belong to the served command.
+    --key|--key=*)
+      if [ "$ephemeral" -eq 1 ]; then echo "vm-share: --ephemeral cannot be combined with --key" >&2; exit 2; fi
+      ;;
+  esac
+  if [ "$key_value" -eq 1 ]; then key_value=0; continue; fi
+  case "$argument" in
+    --key) key_value=1;;
+    ''|-*) ;;
+    *) operand=1;;
+  esac
+done
+[ "$operand" -eq 1 ] || { echo "usage: vm-share [--ephemeral] 3000,8080 | all" >&2; exit 2; }
+exec tailcat serve "${key[@]}" "$@"
 EOF
 chmod 0755 /usr/local/bin/vm-ssh /usr/local/bin/vm-share
 ok "vm-ssh, vm-share"
