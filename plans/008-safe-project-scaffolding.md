@@ -84,7 +84,7 @@ Use a branch such as `fix/safe-project-scaffolding`. You are not alone in the co
 
 ### Step 1: Reject targets containing existing work
 
-Validate a nonempty single project name (not ., .., slash-containing or an option-like name) and the parent path. Before writing anything, reject an existing nonempty directory, a symlink target, an existing repo/worktree and a destination inside an enclosing Git repository. Treat .git files as repositories too; do not rely only on -d .git. Permit an empty directory so verifier fixtures can choose their parent explicitly. Use quoted paths and -- where supported. Return a clear nonzero error without changing files, Git index or HEAD.
+Validate a nonempty single project name (not ., .., slash-containing or an option-like name) and the parent path. Before writing anything, reject an existing nonempty directory, a symlink target, an existing repo/worktree and a destination inside an enclosing Git repository. Treat .git files as repositories too; do not rely only on -d .git. If the parent does not yet exist, check its nearest existing ancestor before creating it. Reject repository-location environment overrides such as GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE, GIT_COMMON_DIR and Git object-directory overrides so no Git write can be redirected to existing work (clarified during execution). Permit an empty directory so verifier fixtures can choose their parent explicitly. Use quoted paths and -- where supported. Return a clear nonzero error without changing files, Git index or HEAD.
 
 **Verify:** `python3 -m unittest discover -s tests -p 'test_scaffold.py' -v` → Dirty repo, worktree, nested repo, nonempty and symlink cases all reject without mutation; fresh/empty destinations proceed.
 

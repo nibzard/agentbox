@@ -132,7 +132,7 @@ No package install/build/typecheck exists for this Bash repository. Python 3 and
 
 **In scope:**
 
-- agentbox.sh (final help/sign-in messaging only; preserve plan 004 failure status handling)
+- agentbox.sh (final help/sign-in messaging and verifier auth-file presence labels only; preserve plan 004 failure status handling)
 - tests/e2e.sh
 - tests/test_e2e_runner.py (create)
 - tests/support.py (only fixture support required here)
@@ -167,7 +167,7 @@ First run all local tests, syntax and diff checks. With the already configured S
 
 ### Step 4: Reconcile public behavior and verification evidence
 
-Update README to say four agents, distinguish installation from authentication, specify Node >=22.19.0 and preserved root distro runtime, describe configuration/rerun ownership and new-project rejection accurately, and replace the "read-only allowlist" claim with an accurate description of preapproved shell commands and file-tool guardrails. Do not change permissions or add hardening flows. Add local/matrix commands and list tested vs untested targets explicitly; do not promise universal idempotency or approximate timings without measurements. Ensure successful setup reports all four sign-in entry points where documentation is shown.
+Update README to say four agents, distinguish installation from authentication, specify Node >=22.19.0 and preserved root distro runtime, describe configuration/rerun ownership and new-project rejection accurately, and replace the "read-only allowlist" claim with an accurate description of preapproved shell commands and file-tool guardrails. Do not change permissions or add hardening flows. Replace the stale fixed five-computer quota statement with a pointer to `steel computer quota` (the execution preflight returned a limit of 10 for this account). Add local/matrix commands and list tested vs untested targets explicitly; do not promise universal idempotency or approximate timings without measurements. Ensure successful setup reports all four sign-in entry points where documentation is shown. The verifier also currently labels a nonempty auth file as “signed in”; change those informational labels to auth-file presence without claiming a validated session.
 
 **Verify:** `bash -n agentbox.sh && bash -n tests/e2e.sh && python3 -m unittest discover -s tests -p 'test_*.py' -v && git diff --check` → Exit 0; docs describe final behavior and recorded live outcomes without claiming unrun checks.
 

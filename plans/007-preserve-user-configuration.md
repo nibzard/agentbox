@@ -113,7 +113,7 @@ No package install/build/typecheck exists for this Bash repository. Python 3 and
 
 **In scope:**
 
-- agentbox.sh (put_block, write_dotfiles, instruction files/symlinks, affected verifier assertions)
+- agentbox.sh (put_block, write_dotfiles, instruction files/symlinks, credential-copy destination path guards, affected verifier assertions)
 - tests/test_preservation.py (create)
 - tests/test_verifier.py (pager/config expectation updates)
 - tests/support.py (only fixture support required here)
@@ -136,7 +136,7 @@ Keep the existing marker-managed .bashrc behavior and refresh system/helper file
 
 ### Step 2: Preserve identities and agent instructions
 
-For an existing .gitconfig, only apply user.name/user.email if GIT_NAME/GIT_EMAIL were explicitly supplied, using git config --file with properly quoted values. If unspecified, preserve existing identity and credential helpers. Create global CLAUDE.md only when absent and create each AGENTS.md symlink only when no path exists; preserve regular user-authored AGENTS.md and differing symlinks. Keep create-if-absent Claude settings/Codex config semantics and credential copying unchanged. Do not build a include/migration framework for this fix.
+For an existing .gitconfig, only apply user.name/user.email if GIT_NAME/GIT_EMAIL were explicitly supplied, using git config --file with properly quoted values. If unspecified, preserve existing identity and credential helpers. Create global CLAUDE.md only when absent and create each AGENTS.md symlink only when no path exists; preserve regular user-authored AGENTS.md and differing symlinks. Keep create-if-absent Claude settings/Codex config semantics and normal credential copying unchanged. Guard credential-copy destinations and their parents against existing symlinks so preservation does not still write through an external target (scope clarified during execution). Do not build a include/migration framework for this fix.
 
 **Verify:** `python3 -m unittest discover -s tests -p 'test_preservation.py' -v` → Explicit identity overrides affect only named keys; unspecified settings and user instructions remain identical; new homes receive the shared default symlinks.
 
